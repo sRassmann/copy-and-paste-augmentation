@@ -16,5 +16,7 @@ path_to_masks_dir = os.path.join(path_to_data_dir, "masks")
 
 path_to_anno_dir = os.path.join(path_to_data_dir, "anno")
 
+path_to_copy_and_paste = os.path.join(path_to_data_dir, "copy_and_paste")
+
 path_to_masked_objs_dir = os.path.join(path_to_data_dir, "masked_objs")
 
