@@ -1,11 +1,8 @@
-from typing import Dict, List, Union
-
 import os
 from pycocotools.coco import COCO
 import numpy as np
 import skimage.io as io
 import matplotlib.pyplot as plt
-import pylab
 from skimage import measure
 from shapely.geometry import Polygon, MultiPolygon
 
@@ -20,7 +17,7 @@ __all__ = ["coco_dataset"]
 
 
 class coco_dataset:
-    """builds coco dataset iteratively to obtain coco anno file"""
+    """builds coco dataset iteratively to obtain coco annotation file"""
 
     info = {}
     licenses = []
@@ -61,7 +58,7 @@ class coco_dataset:
         creates COCO formatted instance annotation and add it to the coco file
 
         Objects are separated if (1) intensity values (greyscale) differ or (2) if they
-         are not connected.
+        are not connected.
         """
         mask = io.imread(mask_path)
         image_id = len(self.images)
@@ -72,10 +69,11 @@ class coco_dataset:
         )
         d_cats = self.get_categories()
         if category_name not in d_cats:
-            cat_id = len(d_cats)
-            self.create_coco_category(category_name, cat_id, super_category_name)
+            cat_id = len(d_cats) + 1
+            self.categories.append(
+                self.create_coco_category(category_name, cat_id, super_category_name))
         else:
-            cat_id = d_cats.index(category_name)
+            cat_id = self.categories[self.get_categories().index(category_name)]["id"]
         self.mask_to_coco(mask, cat_id, image_id, min_area)
 
     def mask_to_coco(self, mask, cat_id, image_id, min_area=0, black_background=False):
@@ -83,10 +81,11 @@ class coco_dataset:
         if not black_background:
             mask = np.invert(mask)
 
-        for cont in measure.find_contours(mask, 0.5, positive_orientation="low"):
+        for cont in measure.find_contours(mask, 0.5, fully_connected="low",
+                                          positive_orientation="low"):
             poly = Polygon(cont)
             if poly.area > min_area:
-                poly = poly.simplify(0.2, preserve_topology=False)
+                # poly = poly.simplify(0.2, preserve_topology=False)
                 self.annotations.append(
                     self.create_coco_segmentation(
                         poly,
@@ -102,19 +101,16 @@ class coco_dataset:
 
         coco_dict = {
             "info": self.info,
-            "licenses": self.licenses,
+            "categories": self.categories,
             "images": self.images,
             "annotations": self.annotations,
-            "categories": self.categories,
+            "licenses": self.licenses,
         }
         jayson = json.dumps(coco_dict)
         if path:
             with open(path, "w+") as f:
-                f.write(json.dumps(coco_dict, indent=4, sort_keys=True))
+                f.write(json.dumps(coco_dict, indent=4, sort_keys=False))
         return jayson
-
-    def annotated_image(self, obj: masked_image, cats_exits=False):
-        """adds an masked image to the existing annotation obj etc"""
 
     def show_annotations(self, data_dir="../data/imgs/", cat_names="all"):
         """verification method, dumps itself to json and reloads using COCO"""
@@ -211,20 +207,18 @@ class coco_dataset:
             "date_created": date_created,
         }
 
-
 def main():
-    c = coco_dataset()
-    c.to_json("../output/test_anno.json")
+    c = coco_dataset("../data/anno/butterfly_anno.json")
     for i in range(1, 6):
         c.add_annotation_from_mask(
             f"../data/masks/bug_{i}.tif",
             f"bug_{i}.tif",
-            "bug_proxy_{i}",
+            f"bug_proxy_{i}",
             "bug",
             min_area=150,
         )
     c.show_annotations()
-    c.to_json("../data/anno/bugs_anno.json")
+    c.to_json("../data/anno/all_anno.json")
 
 
 if __name__ == "__main__":
