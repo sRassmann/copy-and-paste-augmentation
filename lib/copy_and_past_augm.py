@@ -84,7 +84,7 @@ class CopyPasteGenerator:
     The class is thought to be able to Generate images on the fly in order to
     work as dataset class."""
 
-    # ratio in which the aspect ratio of each obj can be manipulated
+    # ratio in which the aspect ratio of each object can be manipulated
     aspect_ratio_distort = 0.82
 
     # standard transformation for individual objs
@@ -141,12 +141,12 @@ class CopyPasteGenerator:
         img_mask = np.zeros((img.shape[0], img.shape[1]))
         cats = []
         for i in range(1, n_objs + 1):
-            # choose obj
+            # choose object
             cat = np.random.choice(self.cats)
             obj = Image.open(np.random.choice(self.objs[cat]))
             cats.append(cat)
 
-            # rescale obj
+            # rescale object
             if size:
                 obj = self._rescale_obj(obj, size, force)
 
@@ -155,43 +155,62 @@ class CopyPasteGenerator:
             obj = np.array(obj.convert("RGB"))
             obj_mask, obj = self._pad_images(obj_mask, obj)
 
-            # data augmentation on obj level
+            # data augmentation on object level
             t = self.obj_augmentation(image=obj, mask=obj_mask)
             obj = t["image"]
             obj_mask = t["mask"]
             obj_mask = (obj_mask > 0).astype(np.uint32)
 
-            # place objs on image
+            # place object on image
             x = np.random.randint(low=0, high=img.shape[1] - obj.shape[1])
             y = np.random.randint(low=0, high=img.shape[0] - obj.shape[0])
             self._place_obj_on_image(img, img_mask, obj, obj_mask, x, y, i)
 
         return img, img_mask, cats
 
+    def visualize_augmentations(self, cats, size=(100, 100), n_examples=10):
+        """show random augmentations for each specified cat"""
+        cats = [cat for cat in cats if cat in self.cats]  # filter for existing cats
+        fig, axs = plt.subplots(len(cats), n_examples, figsize=(13, 4))
+        for i, cat in enumerate(cats):
+            org_obj = Image.open(np.random.choice(self.objs[cat]))
+            for j in range(n_examples):
+                obj = self._rescale_obj(org_obj, size, True).copy()
+                obj_mask = np.array(obj.getchannel("A"))
+                obj = np.array(obj.convert("RGB"))
+                mask, obj = self._pad_images(obj_mask, obj)
+                t = self.obj_augmentation(image=obj, mask=mask)
+                obj = t["image"]
+                mask = (t["mask"] == 0).astype(np.uint32)[..., np.newaxis]
+                obj = np.where(mask, 255, obj)
+                axs[i, j].axis("off")
+                axs[i, j].imshow(obj)
+        plt.show()
+
     def change_background(self, name):
-        self.background = Image.open(os.path.join(self.background_dir, name)).convert(
-            "RGB"
-        )
-        self.h, self.w = (self.background.size[0], self.background.size[1])
+        """set new image (np.ndarray) as background"""
         self.background = io.imread(os.path.join(self.background_dir, name))
         self.h, self.w = (self.background.shape[0], self.background.shape[1])
 
+    def get_categories(self):
+        return list(self.cats)
+
     @staticmethod
     def _place_obj_on_image(img, img_mask, obj, obj_mask, x, y, mask_value):
-        img_mask[y: y + obj.shape[0], x: x + obj.shape[1]] = np.where(
+        img_mask[y : y + obj.shape[0], x : x + obj.shape[1]] = np.where(
             obj_mask,
             obj_mask * mask_value,
-            img_mask[y: y + obj.shape[0], x: x + obj.shape[1]],
-            )
+            img_mask[y : y + obj.shape[0], x : x + obj.shape[1]],
+        )
         obj_mask = obj_mask.reshape(*obj_mask.shape, 1)
-        img[y: y + obj.shape[0], x: x + obj.shape[1], :] = (
-                img[y: y + obj.shape[0], x: x + obj.shape[1], :] * (1 - obj_mask)
-                + obj * obj_mask
+        img[y : y + obj.shape[0], x : x + obj.shape[1], :] = (
+            img[y : y + obj.shape[0], x : x + obj.shape[1], :] * (1 - obj_mask)
+            + obj * obj_mask
         )
 
     @staticmethod
     def _pad_images(mask, obj):
-        pad_len = int(np.ceil(np.sqrt(mask.shape[0] ** 2 + mask.shape[1] ** 2) / 4))
+        pad_len = int(np.ceil(np.sqrt(obj.shape[0] ** 2 + obj.shape[1] ** 2) / 4))
         mask = np.pad(
             mask,
             (
@@ -220,7 +239,7 @@ class CopyPasteGenerator:
         :param obj: PIL image crop to be manipulated
         :param size: range of desired size (uniform distribution)
         :param force: if False, objs are not up-scaled by more than 4 fold
-        :return: rescaled obj
+        :return: rescaled object
         """
         obj_w, obj_h = (obj.size[0], obj.size[1])
         obj_size = max(obj_h, obj_w)
@@ -251,9 +270,10 @@ def main():
     # image = coco.imgs[3]
     # p(image)
     g = CopyPasteGenerator()
+    g.visualize_augmentations(g.get_categories())
     for _ in range(5):
         img, mask, cats = g.generate_random(size=(100, 220))
-        fig, axs = plt.subplots(1,2)
+        fig, axs = plt.subplots(1, 2)
         axs[0].imshow(img)
         axs[1].imshow(mask)
         plt.show()
