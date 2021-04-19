@@ -94,15 +94,14 @@ class CopyPasteGenerator:
                 limit=360, border_mode=cv2.BORDER_CONSTANT, value=255, mask_value=0, p=1
             ),
             A.transforms.ColorJitter(
-                brightness=0.4,
+                brightness=0.3,
                 contrast=0.1,
                 saturation=0.1,
-                hue=0.02,
+                hue=0.03,
                 always_apply=False,
-                p=0.25,
+                p=0.5,
             ),
-            A.transforms.FancyPCA(alpha=0.1, always_apply=False, p=0.5),
-            A.augmentations.transforms.ToSepia(p=0.1),
+            A.transforms.FancyPCA(alpha=0.02, always_apply=False, p=0.5),
             A.augmentations.transforms.ToGray(p=0.1),
         ],
         p=0.85,
@@ -136,6 +135,39 @@ class CopyPasteGenerator:
         """simulate boxes"""
         raise NotImplementedError
 
+    def generate_random(self, n_objs=15, size=None, force=True):
+        """simulate overlaps"""
+        img = self.background.copy()
+        img_mask = np.zeros((img.shape[0], img.shape[1]))
+        cats = []
+        for i in range(1, n_objs + 1):
+            # choose obj
+            cat = np.random.choice(self.cats)
+            obj = Image.open(np.random.choice(self.objs[cat]))
+            cats.append(cat)
+
+            # rescale obj
+            if size:
+                obj = self._rescale_obj(obj, size, force)
+
+            # extract the mask from alpha channel of the image
+            obj_mask = np.array(obj.getchannel("A"))
+            obj = np.array(obj.convert("RGB"))
+            obj_mask, obj = self._pad_images(obj_mask, obj)
+
+            # data augmentation on obj level
+            t = self.obj_augmentation(image=obj, mask=obj_mask)
+            obj = t["image"]
+            obj_mask = t["mask"]
+            obj_mask = (obj_mask > 0).astype(np.uint32)
+
+            # place objs on image
+            x = np.random.randint(low=0, high=img.shape[1] - obj.shape[1])
+            y = np.random.randint(low=0, high=img.shape[0] - obj.shape[0])
+            self._place_obj_on_image(img, img_mask, obj, obj_mask, x, y, i)
+
+        return img, img_mask, cats
+
     def change_background(self, name):
         self.background = Image.open(os.path.join(self.background_dir, name)).convert(
             "RGB"
@@ -144,50 +176,41 @@ class CopyPasteGenerator:
         self.background = io.imread(os.path.join(self.background_dir, name))
         self.h, self.w = (self.background.shape[0], self.background.shape[1])
 
-    def generate_random(self, n_objs=15, size=None, force=True):
-        """simulate overlaps"""
-        img = self.background.copy()
-        mask = Image.new("L", (img.shape[0], img.shape[1]), 0)
-        for v in range(n_objs):
-            # choose obj
-            cat = np.random.choice(self.cats)
-            obj = Image.open(np.random.choice(self.objs[cat]))
-
-            # rescale obj
-            if size:
-                obj = self._rescale_obj(obj, size, force)
-
-            # extract the mask from alpha channel of the image
-            mask = np.array(obj.getchannel("A"))
-            obj = np.array(obj.convert("RGB"))
-            mask, obj = self._pad_images(mask, obj)
-
-            # data augmentation on obj level
-            t = self.obj_augmentation(image=obj, mask=mask)
-            obj = t["image"]
-            mask = t["mask"]
+    @staticmethod
+    def _place_obj_on_image(img, img_mask, obj, obj_mask, x, y, mask_value):
+        img_mask[y: y + obj.shape[0], x: x + obj.shape[1]] = np.where(
+            obj_mask,
+            obj_mask * mask_value,
+            img_mask[y: y + obj.shape[0], x: x + obj.shape[1]],
+            )
+        obj_mask = obj_mask.reshape(*obj_mask.shape, 1)
+        img[y: y + obj.shape[0], x: x + obj.shape[1], :] = (
+                img[y: y + obj.shape[0], x: x + obj.shape[1], :] * (1 - obj_mask)
+                + obj * obj_mask
+        )
 
     @staticmethod
     def _pad_images(mask, obj):
         pad_len = int(np.ceil(np.sqrt(mask.shape[0] ** 2 + mask.shape[1] ** 2) / 4))
-        mask = np.pad(mask,
-                      (
-                          (pad_len, pad_len),  # pad bottom - top
-                          (pad_len, pad_len),  # left - right
-                          ),
-                      mode="constant",
-                      constant_values=0,
-                      )
+        mask = np.pad(
+            mask,
+            (
+                (pad_len, pad_len),  # pad bottom - top
+                (pad_len, pad_len),  # left - right
+            ),
+            mode="constant",
+            constant_values=0,
+        )
         obj = np.pad(
             obj,
             (
                 (pad_len, pad_len),  # pad bottom - top
                 (pad_len, pad_len),  # left - right
                 (0, 0),  # channels
-                ),
+            ),
             mode="constant",
             constant_values=0,
-            )
+        )
         return mask, obj
 
     def _rescale_obj(self, obj, size, force):
@@ -221,7 +244,6 @@ class CopyPasteGenerator:
         return obj
 
 
-
 def main():
     # coco = COCO("../data/anno/all_anno.json")
     # p = PatchCreator("../data/imgs/", "../data/masked_objs/", coco)
@@ -229,7 +251,12 @@ def main():
     # image = coco.imgs[3]
     # p(image)
     g = CopyPasteGenerator()
-    g.generate_random(size=(100, 220))
+    for _ in range(5):
+        img, mask, cats = g.generate_random(size=(100, 220))
+        fig, axs = plt.subplots(1,2)
+        axs[0].imshow(img)
+        axs[1].imshow(mask)
+        plt.show()
 
 
 if __name__ == "__main__":
