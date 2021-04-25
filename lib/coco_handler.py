@@ -3,8 +3,8 @@ from pycocotools.coco import COCO
 import numpy as np
 import skimage.io as io
 import matplotlib.pyplot as plt
-from skimage import measure
-from shapely.geometry import Polygon, MultiPolygon
+import cv2
+from lib import cv2_topology_handler
 
 DESCRIPTION = "Data set for segmenting insects"
 DEFAULT_LICENSE = {
@@ -44,10 +44,18 @@ class coco_dataset:
             self.images = list(ann.imgs.values())
             self.categories = list(ann.cats.values())
             self.annotations = list(ann.anns.values())
+        self.category_name_id_dict = {
+            entry["name"]: entry["id"] for entry in self.categories
+        }
 
-    def add_annotation_from_mask(
+    def find_cat_name_of_id(self, cat_id):
+        return list(self.category_name_id_dict.keys())[
+            list(self.category_name_id_dict.values()).index(cat_id)
+        ]
+
+    def add_annotation_from_binary_mask(
         self,
-        mask_path,
+        mask,
         image_name,
         category_name,
         super_category_name="",
@@ -55,45 +63,113 @@ class coco_dataset:
         min_area=0,
     ):
         """
-        creates COCO formatted instance annotation and add it to the coco file
+        creates COCO formatted instance annotation and add it to the coco file.
 
-        Objects are separated if (1) intensity values (greyscale) differ or (2) if they
-        are not connected.
+        Objects are separated if they are not connected.
+
+        :param mask: mask image (np.ndarray) or str as path to the image
+        :param image_name: name of the image file
+        :param category_name: name of category
+        :param img_license: img license id
+        :param min_area: minimum object area to be considered
         """
-        mask = io.imread(mask_path)
+        if isinstance(mask, str):
+            mask = io.imread(mask)
         image_id = len(self.images)
         self.images.append(
             self.create_coco_image(
                 img_license, image_name, mask.shape[0], mask.shape[1], image_id
             )
         )
-        d_cats = self.get_categories()
-        if category_name not in d_cats:
-            cat_id = len(d_cats) + 1
+        if category_name not in self.category_name_id_dict.keys():
+            cat_id = len(self.category_name_id_dict) + 1
             self.categories.append(
-                self.create_coco_category(category_name, cat_id, super_category_name))
+                self.create_coco_category(category_name, cat_id, super_category_name)
+            )
+            self.category_name_id_dict[category_name] = len(self.categories)
         else:
-            cat_id = self.categories[self.get_categories().index(category_name)]["id"]
-        self.mask_to_coco(mask, cat_id, image_id, min_area)
+            cat_id = self.category_name_id_dict[category_name]
 
-    def mask_to_coco(self, mask, cat_id, image_id, min_area=0, black_background=False):
-        mask = np.flip(np.rot90(mask, 1), axis=0)  # empirically proven necessary
-        if not black_background:
-            mask = np.invert(mask)
-
-        for cont in measure.find_contours(mask, 0.5, fully_connected="low",
-                                          positive_orientation="low"):
-            poly = Polygon(cont)
-            if poly.area > min_area:
-                # poly = poly.simplify(0.2, preserve_topology=False)
-                self.annotations.append(
-                    self.create_coco_segmentation(
-                        poly,
-                        entry_id=len(self.annotations),
-                        image_id=image_id,
-                        category_id=cat_id,
+        _, contours, hierarchy = cv2.findContours(
+            mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if len(contours) > 0:
+            i = 0
+            while True:  # all contours on first hierarchy level
+                c = cv2_topology_handler.handle_contour_topology(
+                    contours, hierarchy, i
+                )  # exclude holes
+                area = cv2.contourArea(c)
+                if area > min_area:
+                    self.annotations.append(
+                        coco_dataset.create_coco_segmentation(
+                            [self.cv2_contour_to_coco_annotation(c)],
+                            [*cv2.boundingRect(c)],
+                            area,
+                            len(self.annotations),
+                            image_id,
+                            cat_id,
+                            is_crowd=0,
+                        )
                     )
+                i = hierarchy[0, i, 0]  # get next contour
+                if i < 0:
+                    break
+
+    def add_annotations_from_instance_mask(
+        self,
+        mask,
+        image_name,
+        category_names,
+        img_license=1,
+        min_area=0,
+    ):
+        """
+        creates COCO formatted instance annotation and add it to the coco file
+
+        Objects are only separated if intensity values (greyscale) differ.
+        The greyscale value is used to index category_name.
+
+        :param mask: mask image (np.ndarray) or str as path to the image
+        :param image_name: name of the image file
+        :param category_names: name of categories as list
+        :param img_license: img license id
+        :param min_area: minimum object area to be considered
+        """
+        if isinstance(mask, str):
+            mask = io.imread(mask)
+        image_id = len(self.images)
+        self.images.append(
+            self.create_coco_image(
+                img_license, image_name, mask.shape[0], mask.shape[1], image_id
+            )
+        )
+        # create non existing categories
+        existing_cats = self.category_name_id_dict.keys()
+        for n in set(category_names):
+            if n not in existing_cats:
+                self.categories.append(
+                    self.create_coco_category(n, len(self.categories) + 1, "")
                 )
+                # TODO implement retrieval of supercat
+                self.category_name_id_dict[n] = len(self.categories)
+
+        for value in np.unique(mask):
+            if value == 0:  # ignore background
+                continue
+            _, cont, hir = cv2.findContours(
+                (mask == value).astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+            )
+            ann = self.create_coco_segmentation_single_instance(
+                cont,
+                hir,
+                entry_id=len(self.annotations),
+                image_id=image_id,
+                category_id=self.category_name_id_dict[category_names[value - 1]],
+                min_area=min_area,
+            )
+            if ann:
+                self.annotations.append(ann)
 
     def to_json(self, path=None):
         """dump obj to coco-compatible JSON String"""
@@ -125,46 +201,90 @@ class coco_dataset:
             annIds = coco.getAnnIds(imgIds=i, catIds=cat_ids, iscrowd=None)
             anns = coco.loadAnns(annIds)
             img = io.imread(os.path.join(data_dir, coco.imgs[i]["file_name"]))
+            plt.figure(figsize=(10, 15))
             plt.axis("off")
             plt.imshow(img)
             coco.showAnns(anns)
             plt.show()
 
-    def get_categories(self):
+    def get_categories_as_list(self):
         return [cat_dict["name"] for cat_dict in self.categories]
+
+    def get_categories(self):
+        return self.categories.copy()
+
+    # TODO remove?
+    def set_categories(self, categories):
+        self.categories = categories
+        self.category_name_id_dict = {
+            entry["name"]: entry["id"] for entry in self.categories
+        }
+
+    @staticmethod
+    def create_coco_segmentation_single_instance(
+        contours,
+        hierarchy,
+        entry_id,
+        image_id,
+        category_id,
+        min_area=0,
+        is_crowd=0,
+    ) -> dict:
+        """
+        Create coco segmentation from cv2 contours correcting for topology (e.g.
+        holes encapsulated in the object)
+
+        Contours on the same hierarchy level are assumed to be the same instance.
+        """
+        segs = []
+        area = 0
+        outline = []
+        i = 0  # outer objects is at zero in hierarchy
+        while True:
+            if len(contours[i]) > 2:  # contour is valid
+                c = cv2_topology_handler.handle_contour_topology(
+                    contours, hierarchy, i
+                )  # exclude holes
+                segs.append(
+                    coco_dataset.cv2_contour_to_coco_annotation(c)
+                )  # add contour
+                area += cv2.contourArea(c)
+                x, y, w, h = cv2.boundingRect(c)
+                outline.append([x, y, x + w, y + h])
+            i = hierarchy[0, i, 0]
+            if i == -1:
+                break  # stop searching once there are no more contours on the same level
+        # evaluate joint metric
+        if area < min_area:
+            return None
+        outline = np.array(outline)
+        x = int(np.min(outline[:, 0]))
+        y = int(np.min(outline[:, 1]))
+        w = int(np.max(outline[:, 2])) - x
+        h = int(np.max(outline[:, 3])) - y
+        return coco_dataset.create_coco_segmentation(
+            segs, [x, y, w, h], area, entry_id, image_id, category_id, is_crowd
+        )
 
     ## --- Methods to handle COCO compatible entry formatting ---
 
     @staticmethod
-    def create_coco_segmentation(poly, entry_id, image_id, category_id, is_crowd=0):
-        """create coco segmentation from shapely.geometry.polygon.Polygon"""
-        segs = []
-        if isinstance(poly, Polygon):
-            segs.append(coco_dataset.poly_to_flat_list(poly))
-        elif isinstance(poly, MultiPolygon):
-            segs = []
-            for p in list(poly):
-                segs.append(coco_dataset.poly_to_flat_list(p))
+    def cv2_contour_to_coco_annotation(contour):
+        return contour.ravel().tolist()
+
+    @staticmethod
+    def create_coco_segmentation(
+        poly, bbox, area, entry_id, image_id, category_id, is_crowd=0
+    ):
         return {
             "id": entry_id,
             "image_id": image_id,
             "category_id": category_id,
             "iscrowd": is_crowd,
-            "area": poly.area,
-            "bbox": [*coco_dataset.convert_bb_to_coco(*poly.bounds)],
-            "segmentation": segs,
+            "area": area,
+            "bbox": bbox,
+            "segmentation": poly,
         }
-
-    @staticmethod
-    def poly_to_flat_list(poly):
-        return np.array(poly.exterior.coords).ravel().tolist()
-
-    @staticmethod
-    def convert_bb_to_coco(minx, miny, maxx, maxy):
-        """converts bb from shapely to coco format"""
-        width = round(maxx - minx, 1)
-        height = round(maxy - miny, 1)
-        return round(minx), round(miny), width, height
 
     @staticmethod
     def create_coco_category(cat_name, cat_id, super_cat=""):
@@ -207,18 +327,24 @@ class coco_dataset:
             "date_created": date_created,
         }
 
+
 def main():
-    c = coco_dataset("../data/anno/butterfly_anno.json")
-    for i in range(1, 6):
-        c.add_annotation_from_mask(
-            f"../data/masks/bug_{i}.tif",
-            f"bug_{i}.tif",
-            f"bug_proxy_{i}",
-            "bug",
-            min_area=150,
+    from lib import constants
+    import pandas as pd
+
+    c = coco_dataset(os.path.join(constants.path_to_anno_dir, "butterfly_anno.json"))
+    d = os.path.join(constants.path_to_data_dir, "bug_labelling.csv")
+    d = pd.read_csv(d)
+    for _, row in d.iterrows():
+        c.add_annotation_from_binary_mask(
+            os.path.join(constants.path_to_masks_dir, row["mask"]),
+            row["crop_image_name"],
+            row["rough_class"],
+            row["rough_class"],
+            min_area=row["min_area"],
         )
-    c.show_annotations()
-    c.to_json("../data/anno/all_anno.json")
+    # c.show_annotations(cat_names=["bug"])
+    c.to_json(os.path.join(constants.path_to_anno_dir, "all_anno.json"))
 
 
 if __name__ == "__main__":
