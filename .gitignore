@@ -50,6 +50,8 @@ data/
 ## output
 output/
 
+## detectron2_repo
+detectron2_repo
 
 
 ## run log file

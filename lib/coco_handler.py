@@ -19,20 +19,19 @@ __all__ = ["coco_dataset"]
 class coco_dataset:
     """builds coco dataset iteratively to obtain coco annotation file"""
 
-    info = {}
-    licenses = []
-    images = []
-    categories = []
-    annotations = []
-    n_images = 0
-    n_categories = 0
-    n_annotations = 0
-
     def __init__(self, path_to_existing_coco=None, info=None, license=None):
         """
         creates coco_dataset instance based on existing coco annotation or a dummy file
          (if path_to_existing_coco = None)
         """
+        self.info = {}
+        self.licenses = []
+        self.images = []
+        self.categories = []
+        self.annotations = []
+        self.n_images = 0
+        self.n_categories = 0
+        self.n_annotations = 0
         if not info:
             self.info = self.create_coco_info(
                 contrib=["Sebastian Rassmann"], version="v0.0.0", descr=DESCRIPTION
@@ -182,13 +181,11 @@ class coco_dataset:
             "annotations": self.annotations,
             "licenses": self.licenses,
         }
-        jayson = json.dumps(coco_dict)
         if path:
             with open(path, "w+") as f:
                 f.write(json.dumps(coco_dict, indent=4, sort_keys=False))
-        return jayson
 
-    def show_annotations(self, data_dir="../data/imgs/", cat_names="all"):
+    def show_annotations(self, data_dir="../data/raw/imgs/", cat_names="all"):
         """verification method, dumps itself to json and reloads using COCO"""
         tmp_json_path = "../output/tmp/tmp_coco_anno.json"
         self.to_json(tmp_json_path)
