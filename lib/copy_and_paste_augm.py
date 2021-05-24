@@ -5,17 +5,9 @@ Optimized to integrate with detectron2
 """
 from abc import abstractmethod
 
-import skimage
-from torchvision import transforms
-
-import lib.coco_handler as ch
 import os
-from pycocotools.coco import COCO
 import numpy as np
-import skimage.io as io
-import matplotlib.pyplot as plt
-from skimage import measure, morphology
-from shapely.geometry import Polygon, MultiPolygon
+from skimage import morphology
 from tqdm import tqdm
 from PIL import Image
 import json
@@ -32,6 +24,10 @@ from torch.utils.data import Dataset
 
 
 class PatchCreator:
+
+    """class handling cutting out objects as image patches from the image bases on
+    a COCO instance annotation file"""
+
     # TODO refactor to opencv
     # tolerance to compensate for rounding in the bounding box representation
     xmin_tol = 1
@@ -39,7 +35,22 @@ class PatchCreator:
     ymin_tol = 1
     ymax_tol = 2
 
-    def __init__(self, img_dir, output_dir, coco, save_patches=True):
+    def __init__(
+        self,
+        coco,
+        img_dir=constants.path_to_imgs_dir,
+        output_dir=os.path.join(constants.path_to_output_dir, "patches"),
+        save_patches=True,
+    ):
+        """
+        create Callable PatchCreator
+
+        Args:
+            coco (pycocotools.coco.COCO): loaded coco istance annotation
+            img_dir: base dir of raw images
+            output_dir: dst dir for output
+            save_patches: Save patches
+        """
         self.img_dir = img_dir
         self.output_dir = output_dir
         self.coco = coco
@@ -52,7 +63,14 @@ class PatchCreator:
         self.cat_ids = coco.getCatIds()
         self.save = save_patches
 
-    def __call__(self, coco_image, dilation=None):
+    def __call__(self, coco_image, dilation=None) -> None:
+        """
+        create patches from coco image
+
+        Args:
+            coco_image: coco.imgs entry
+            dilation: amount of morphological mask dilation
+        """
         img = Image.open(os.path.join(self.img_dir, coco_image["file_name"]))
         img = img.convert("RGBA")
         img = np.asarray(img.convert("RGBA"))
@@ -91,10 +109,10 @@ class PatchCreator:
 
 
 class CopyPasteGenerator(Dataset):
-    """Given a directory containing segmented objects this class generates randomly
-    composed images.
+    """Given a directory containing segmented objects (Patches) this class generates
+    randomly composed images.
 
-    The class is thought to be able to generate images on the fly in order to
+    The class is thought to be able to generate images on-the-fly in order to
     work as dataset class."""
 
     # Perform no data augmentation as default
@@ -113,6 +131,24 @@ class CopyPasteGenerator(Dataset):
         n_augmentations=0,
         scale=1,
     ):
+        """
+        Initialize abstract CopyPasteGenerator.
+
+        This loads all available background images into RAM and initializes the
+        placement frames.
+        The objects are loaded, rescaled, and, if specified, augmentations are applied
+        to the individual objs and stored in RAM.
+
+        Args:
+            obj_dir: path to base directory containing on directory for each obj category
+            background_dir: path to directory containing usable background images
+            background_anno: path to background image frame annotation json
+            output_resolution (int, int): target resolution of the images (if None the
+             original background image resolutions are used)
+            max_n_objs: maximum number of objects placed in one generate image
+            n_augmentations: number of augmented version per object
+            scale: rescale factor for each object
+        """
         self.res = output_resolution
         self.background_dir = background_dir
         self.grid_rects, self.backgrounds = self.init_backgrounds(background_anno)
@@ -120,7 +156,8 @@ class CopyPasteGenerator(Dataset):
         self.max_n_objs = max_n_objs
         self.patches = self.create_patch_pool(obj_dir, n_augmentations, scale)
 
-    def create_from_existing_pool(self):
+    @classmethod
+    def create_from_existing_pool(cls):
         """create Generator that uses the same raw image pool as another existing obj"""
         raise NotImplementedError
 
@@ -137,7 +174,7 @@ class CopyPasteGenerator(Dataset):
         }  # get image from patch pool with self.patches[cat_name][idx]
 
     def add_scaled_version(self, cat, scale=2, n_augmentations=1):
-        """adds down-scaled version of defined cat to the patch pool"""
+        """adds down-scaled version of defined category to the patch pool"""
         org_pool = self.patches[cat]
         self.patches[f"{cat}-{scale}"] = self.PatchPool.create_from_existing_pool(
             org_pool,
@@ -169,22 +206,32 @@ class CopyPasteGenerator(Dataset):
     @abstractmethod
     def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
         """
-        atomic obj placement routine, override this func for specific patterns of obj
-        placement
+        Atomic obj placement routine, override this function for specific patterns of
+        object placement
 
         It should paste images (e.g. using
-        :func:`copy_and_paste_augm.CopyPasteGenerator.paste_object`) to image and and
-        image_mask and return the generated annotations
+        :func:`copy_and_paste_augm.CopyPasteGenerator.paste_object`) to the background
+        image and image_mask, and return the generated annotations.
 
-        :param np.ndarray image: background image on which objs are place
-        :param np.ndarray image_mask: mask of the image (initially all 0)
-        :param list(int) frame_rect: rectangle defining frame in which the objects can
-        be placed (as [xmin, ymin, w, h])
-        :param int max_n_objs: maximum number of objs to be placed.
+        Args:
+            image (np.ndarray): (partially filled) background image on which objs are
+             placed
+            image_mask (np.ndarray): (partially filled) mask of the image
+            frame_rect ([int, int, int, int]): rectangle defining frame in which the
+             objects can be placed (as [xmin, ymin, w, h])
+            max_n_objs: maximum number of objs to be placed in this particular frame
+
+        Returns:
+            (full_size_masks, bounding_boxes, cats):
+                full_size_masks (list(np.ndarray)): list of instance masks
+                bounding_boxes (list([int, int, int, int])): bounding boxes of the
+                instances
+                cats (list(int)): category ids of the instances
         """
         pass
 
     def init_backgrounds(self, background_anno):
+        """load background and frame annotation and rescale"""
         rects = json.load(open(os.path.join(self.background_dir, background_anno)))
         grid_rects = {
             k: v
@@ -195,6 +242,7 @@ class CopyPasteGenerator(Dataset):
         for k, v in grid_rects.items():
             img = cv2.imread(os.path.join(self.background_dir, k))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            assert img.shape[2] == 3
             if self.res:
                 # rescale image to max res
                 fmax = max(self.res) / max(img.shape[:2])
@@ -226,22 +274,35 @@ class CopyPasteGenerator(Dataset):
     def get_background(self, index):
         key = list(self.backgrounds.keys())[index]
         image = self.backgrounds[key].copy()
-        assert image.shape[2] == 3
         rects = self.grid_rects[key]
         mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
         return image, mask, rects
 
-    def __len__(self):
+    def __len__(self) -> int:
         """dummy length (substitutes epoch length) for Dataset compatibility"""
         return self.length
 
-    def __getitem__(self, item):
-        """Override method in torch Dataset superclass"""
-        np.random.seed(item)
+    def __getitem__(self, seed) -> (np.ndarray, list(np.ndarray), list([int, int, int, int]), [int]):
+        """
+        Generate image with specified seed
+
+        Args:
+            seed (int): seed used for np.random.seed
+
+        Returns:
+            (img, image_masks, bboxs, cats):
+                img (np.ndarray): generated image (rgb)
+                image_masks (list(np.ndarray)): instance masks
+                bboxs (list([int, int, int, int])): bounding boxes of generated
+                image
+                cats (list(int)): category ids of the instances
+        """
+        np.random.seed(seed)
         img, image_masks, bboxs, cats, _ = self.generate()
         return img, image_masks, bboxs, cats
 
     def __call__(self):
+
         img, image_masks, bboxs, cats, _ = self.generate()
         return img, image_masks, bboxs, cats
 
@@ -266,17 +327,22 @@ class CopyPasteGenerator(Dataset):
         """
         Paste an object on a background image
 
-        :param np.ndarray image: background image (8 bit rgb)
-        :param np.ndarray image_mask: background image mask (8 bit greyscale)
-         (used for handling overlaps)
-        :param np.ndarray obj: object (8 bit rgb)
-        :param np.ndarray obj_mask : mask of the object (8 bit greyscale)
-        :param int x_min : x coord of the object on the background image
-        :param int y_min: y coord of the object on the background image
-        :param skip_if_overlap_func: func(obj_area, visible_obj_area) -> bool: if the
-        func is defined (not None) and evaluates to True the obj is not placed
-        :returns: inserted object mask (might be partially covered) and coordinates or
-        None if the obj was not placed
+        Args:
+            image (np.ndarray): background image (8 bit rgb)
+            image_mask (np.ndarray): background image mask (8 bit greyscale)
+             (used for handling overlaps)
+            obj (np.ndarray): object (8 bit rgb)
+            obj_mask (np.ndarray): mask of the object (8 bit greyscale)
+            x_min (int): minimum x coord (upper limit) of the object on the background
+             image
+            y_min (int): minimum y (left limit) coord of the object on the background
+             image
+            skip_if_overlap_func (func(obj_area, visible_obj_area) -> bool): if the
+             func is defined (not None) and evaluates to True the obj is not placed
+
+        Returns:
+            inserted object mask (might be partially covered) and coordinates or
+             None if the obj was not placed
         """
         # set up coords -> image[y_min : y_max, x_min : x_max] is manipulated
         assert image.dtype == np.uint8 and image.shape[2] == 3
@@ -345,14 +411,15 @@ class CopyPasteGenerator(Dataset):
             Create PatchPool object from obj_dir to handle RAM caching for the pool of
             patches.
 
-            :param obj_dir: parent dir of patches, all  png files are considered
-            :param cat_label: label of the category, will be returned together with
-            the obj and mask
-            :param aug_transforms: Albumentations image and mask transformation (if None
-            the images is left unchanged)
-            :param n_augmentations: number of augmented versions per patch
-            :param min_max_size: min size of the larger patch side
-            :param scale: scale factor by which the patch is resized
+            Args:
+                obj_dir: parent dir of patches, all  png files are considered
+                cat_label: label of the category, will be returned together with
+                 the obj and mask
+                aug_transforms: Albumentations image and mask transformation (if None
+                 the images is left unchanged)
+                n_augmentations: number of augmented versions per patch
+                min_max_size: min size of the larger patch side
+                scale: scale factor by which the patch is resized
             """
             self.cat_label = cat_label
             self.augment = aug_transforms
@@ -543,6 +610,11 @@ class CopyPasteGenerator(Dataset):
 
 
 class RandomGenerator(CopyPasteGenerator):
+    """
+    Places the images randomly with the only restrictions in the case the
+    skip_if_overlap function is specified.
+    """
+
     # standard transformation for individual objs completely at random
     # TODO add rescale parameter here, if the image is rotated quality is lost anyways
     AUGMENT = A.Compose(
@@ -574,6 +646,12 @@ class RandomGenerator(CopyPasteGenerator):
         scale=1,
         assumed_obj_size=300 * 300,
     ):
+        """
+        Extends overwritten init methods with the following args
+
+        Args:
+            assumed_obj_size: heuristic parameter to specify object density
+        """
         super().__init__(
             obj_dir,
             background_dir,
@@ -593,13 +671,7 @@ class RandomGenerator(CopyPasteGenerator):
 
     def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
         """
-        Chooses random objects and distributes them randomly within the frame.
-
-        :param np.ndarray image: background image on which objs are place
-        :param np.ndarray image_mask: mask of the image (initially all 0)
-        :param list(int) frame_rect: rectangle defining frame in which the objects can
-        be placed (as [xmin, ymin, w, h])
-        :param int max_n_objs: maximum number of objs to be placed.
+        Implementation of abstract place_in_rect function in parent.
         """
         # create list of objs from different pools (-> cats)
         artificial_pool = []
@@ -637,6 +709,11 @@ class RandomGenerator(CopyPasteGenerator):
 
 
 class CollectionBoxGenerator(CopyPasteGenerator):
+    """
+    Chooses a single category at a single scale and places objs from this pool in a
+    grid layout within the frame.
+    """
+
     # standard transformation for individual objs for box simulation
     AUGMENT = A.Compose(
         [
@@ -667,6 +744,12 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         scale=1,
         grid_pos_jitter=0.2,
     ):
+        """
+        Extends overwritten init methods with the following args
+
+        Args:
+            grid_pos_jitter: heuristic parameter to specify jitter within the
+        """
         super().__init__(
             obj_dir,
             background_dir,
@@ -688,14 +771,7 @@ class CollectionBoxGenerator(CopyPasteGenerator):
 
     def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
         """
-        Chooses a single category at a single scale and places objs from this pool
-        in a grid layout within the frame.
-
-        :param np.ndarray image: background image on which objs are place
-        :param np.ndarray image_mask: mask of the image (initially all 0)
-        :param list(int) frame_rect: rectangle defining frame in which the objects can
-        be placed (as [xmin, ymin, w, h])
-        :param int max_n_objs: maximum number of objs to be placed.
+        Implementation of abstract place_in_rect function in parent.
         """
         # choose random cat and scale
         cat = np.random.choice(self.cats)

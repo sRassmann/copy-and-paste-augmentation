@@ -47,7 +47,7 @@ class coco_dataset:
             entry["name"]: entry["id"] for entry in self.categories
         }
 
-    def find_cat_name_of_id(self, cat_id):
+    def find_cat_name_of_id(self, cat_id) -> list:
         return list(self.category_name_id_dict.keys())[
             list(self.category_name_id_dict.values()).index(cat_id)
         ]
@@ -60,17 +60,19 @@ class coco_dataset:
         super_category_name="",
         img_license=1,
         min_area=0,
-    ):
+    ) -> None:
         """
         creates COCO formatted instance annotation and add it to the coco file.
 
         Objects are separated if they are not connected.
 
-        :param mask: mask image (np.ndarray) or str as path to the image
-        :param image_name: name of the image file
-        :param category_name: name of category
-        :param img_license: img license id
-        :param min_area: minimum object area to be considered
+        Args:
+            mask (np.ndarray): mask image or str as path to the image
+            image_name (str): name of the image file
+            category_name (str): name of category
+            super_category_name (str): name of super category
+            img_license (int): img license id
+            min_area (int): minimum object area to be considered
         """
         if isinstance(mask, str):
             mask = io.imread(mask)
@@ -129,11 +131,12 @@ class coco_dataset:
         Objects are only separated if intensity values (greyscale) differ.
         The greyscale value is used to index category_name.
 
-        :param mask: mask image (np.ndarray) or str as path to the image
-        :param image_name: name of the image file
-        :param category_names: name of categories as list
-        :param img_license: img license id
-        :param min_area: minimum object area to be considered
+        Args:
+            mask (np.ndarray): mask image or str as path to the image
+            image_name (str): name of the image file
+            category_names (str): name of categories as list
+            img_license (int): img license id
+            min_area (int): minimum object area to be considered
         """
         if isinstance(mask, str):
             mask = io.imread(mask)

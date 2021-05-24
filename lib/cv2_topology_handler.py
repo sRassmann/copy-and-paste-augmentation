@@ -5,18 +5,19 @@ utility funcs to handle encapsulated objects
 import numpy as np
 
 
-def handle_encapsulated_contour(outer_cont, inner_cont):
+def handle_encapsulated_contour(outer_cont, inner_cont) -> np.ndarray:
     """
     given an outer contour (potentially) containing included inner contours this
     functions generates a contour representing the exact topology (outer contour
     without in the inner contours).
 
-    :param outer_cont: Outer contour obtained using opencv.
-    :type outer_cont: np.ndarray
-    :param inner_cont: list. list containing inner contours. If empty, this functions
-    returns the unchanged outer_cont.
-    :type inner_cont: list[np.ndarray]
-    :return: topology-corrected outer contour.
+    Args:
+        outer_cont (np.ndarray): Outer contour obtained using opencv
+        inner_cont (list): list containing inner contours. If empty, this functions
+         returns the unchanged outer_cont
+
+    Returns:
+         topology-corrected outer contour
     """
     if len(inner_cont) == 0:
         return outer_cont
@@ -33,18 +34,18 @@ def handle_encapsulated_contour(outer_cont, inner_cont):
     return joint
 
 
-def handle_contour_topology(contours, hierarchy, contour_index=0):
+def handle_contour_topology(contours, hierarchy, contour_index=0) -> np.ndarray:
     """
     generates a contour excluding encapsulated holes from cv2.findContours() results
     (deeper levels of topology are ignored, see demo)
 
-    :param contours: contours obtained from cv2.findContours()
-    :type contours: list[np.ndarray]
-    :param hierarchy: contour hierarchy obtained from cv2.findContours()
-    :type hierarchy: np.ndarray
-    :param contour_index: index of outer contour (default 0)
-    :type contour_index: int
-    :return: topology-corrected outer contour (contour excluding holes)
+    Args:
+        contours (list[np.ndarray]): contours obtained from cv2.findContours()
+        hierarchy (np.ndarray): contour hierarchy obtained from cv2.findContours()
+        contour_index (int): topology-corrected outer contour (contour excluding holes)
+
+    Returns:
+          Corrected contour
     """
     assert len(contours) != 0
     assert (

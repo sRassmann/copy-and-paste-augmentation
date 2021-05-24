@@ -53,6 +53,8 @@ output/
 ## detectron2_repo
 detectron2_repo
 
+## playground
+nb/playground/
 
 ## run log file
 run.log
