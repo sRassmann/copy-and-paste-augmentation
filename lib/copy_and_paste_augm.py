@@ -57,7 +57,10 @@ class PatchCreator:
         self.average_sizes = {}
         self.cat_indices = {}
         for cat in coco.cats.values():
-            os.makedirs(os.path.join(self.output_dir, cat["name"]), exist_ok=True)
+            os.makedirs(
+                os.path.join(self.output_dir, f"{cat['id']}-{cat['name']}"),
+                exist_ok=True,
+            )
             self.cat_indices[cat["name"]] = 0  # count number of objects for indexing
             self.average_sizes[cat["name"]] = (0, 0)  # average over sizes
         self.cat_ids = coco.getCatIds()
@@ -100,7 +103,11 @@ class PatchCreator:
             self.cat_indices[cat] = i
             if self.save:
                 Image.fromarray(obj).save(
-                    os.path.join(self.output_dir, cat, f"{cat}-{i}-{an['id']}.png")
+                    os.path.join(
+                        self.output_dir,
+                        f"{an['category_id']}-{cat}",
+                        f"{cat}(id_{an['category_id']})-{i}-{an['id']}.png",
+                    )
                 )
             self.average_sizes[cat] = (
                 (self.average_sizes[cat][0] * (i - 1) + w) / i,
@@ -154,29 +161,44 @@ class CopyPasteGenerator(Dataset):
         self.res = output_resolution
         self.background_dir = background_dir
         self.grid_rects, self.backgrounds = self.init_backgrounds(background_anno)
-        self.cats = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
+        dirs = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
+        self.cat_ids = [s.split("-")[0] for s in dirs]
+        self.cat_labels = [s.split("-")[1] for s in dirs]
         self.max_n_objs = max_n_objs
         self.patches = self.create_patch_pool(obj_dir, n_augmentations, scale)
 
     @classmethod
     def create_from_existing_pool(cls):
-        """create Generator that uses the same raw image pool as another existing obj"""
+        """
+        create Generator that uses the same raw image pool as another existing obj
+        """
         raise NotImplementedError
 
-    def create_patch_pool(self, obj_dir, n_augmentations=0, scale=1):
+    def create_patch_pool(self, obj_dir, n_augmentations=0, scale=1) -> None:
+        """
+        generate patch pool dictionary
+        """
         return {
-            cat: CopyPasteGenerator.PatchPool(
-                os.path.join(obj_dir, cat),
-                cat_label=cat,
+            cat_label: CopyPasteGenerator.PatchPool(
+                os.path.join(obj_dir, f"{cat_id}-{cat_label}"),
+                cat_id=cat_id,
+                cat_label=cat_label,
                 aug_transforms=self.AUGMENT,
                 n_augmentations=n_augmentations,
                 scale=scale,
             )
-            for cat in self.cats
+            for cat_id, cat_label in zip(self.cat_ids, self.cat_labels)
         }  # get image from patch pool with self.patches[cat_name][idx]
 
-    def add_scaled_version(self, cat, scale=2, n_augmentations=1):
-        """adds down-scaled version of defined category to the patch pool"""
+    def add_scaled_version(self, cat, scale=2, n_augmentations=1) -> None:
+        """
+        adds down-scaled version of defined category to the patch pool
+
+        Args:
+            cat: category name (without the id) of the category to add
+            scale: base scale of the patches
+            n_augmentations: number of augmentations per object
+        """
         org_pool = self.patches[cat]
         self.patches[f"{cat}-{scale}"] = self.PatchPool.create_from_existing_pool(
             org_pool,
@@ -186,7 +208,9 @@ class CopyPasteGenerator(Dataset):
         )
 
     def generate(self) -> (np.ndarray, [np.ndarray], [int], [str], np.ndarray):
-        """generate image of randomly place objects"""
+        """
+        generates image of randomly place objects
+        """
         max_n_objs = self.max_n_objs
         img, img_mask, rects = self.get_background(
             np.random.randint(0, len(self.backgrounds))
@@ -232,8 +256,10 @@ class CopyPasteGenerator(Dataset):
         """
         pass
 
-    def init_backgrounds(self, background_anno):
-        """load background and frame annotation and rescale"""
+    def init_backgrounds(self, background_anno) -> None:
+        """
+        load background and frame annotation and rescale
+        """
         rects = json.load(open(os.path.join(self.background_dir, background_anno)))
         grid_rects = {
             k: v
@@ -272,7 +298,11 @@ class CopyPasteGenerator(Dataset):
                 grid_rects[k][i] = [round(x), round(y), round(w), round(h)]
         return grid_rects, backgrounds
 
-    def get_background(self, index):
+    def get_background(self, index) -> (np.ndarray, np.ndarray, list):
+        """
+        Select random background and return it alongside the empty mask and the frame
+         rectangles.
+        """
         key = list(self.backgrounds.keys())[index]
         image = self.backgrounds[key].copy()
         rects = self.grid_rects[key]
@@ -280,7 +310,9 @@ class CopyPasteGenerator(Dataset):
         return image, mask, rects
 
     def __len__(self) -> int:
-        """dummy length (substitutes epoch length) for Dataset compatibility"""
+        """
+        dummy length (substitutes epoch length) for Dataset compatibility
+        """
         return self.length
 
     def __getitem__(
@@ -309,7 +341,9 @@ class CopyPasteGenerator(Dataset):
         return img, image_masks, bboxs, cats
 
     def visualize_pool(self):
-        """shows examples for each pool"""
+        """
+        shows examples for each pool
+        """
         for cat, pool in self.patches.items():
             pool.visualize_augmentations(3, title=cat)
 
@@ -405,6 +439,7 @@ class CopyPasteGenerator(Dataset):
         def __init__(
             self,
             obj_dir,
+            cat_id=-1,
             cat_label=None,
             aug_transforms=None,
             n_augmentations=1,
@@ -417,6 +452,7 @@ class CopyPasteGenerator(Dataset):
 
             Args:
                 obj_dir: parent dir of patches, all  png files are considered
+                cat_id: category id of the represented patches
                 cat_label: label of the category, will be returned together with
                  the obj and mask
                 aug_transforms: Albumentations image and mask transformation (if None
@@ -426,6 +462,7 @@ class CopyPasteGenerator(Dataset):
                 scale: scale factor by which the patch is resized
             """
             self.cat_label = cat_label
+            self.cat_id = cat_id
             self.augment = aug_transforms
             self.n_augment = n_augmentations
             if n_augmentations < 1:
@@ -437,6 +474,7 @@ class CopyPasteGenerator(Dataset):
             self.objs = []
             self.masks = []
 
+            self.image_shapes = np.ndarray([0])
             self.mean_h = 0  # real height (after augmentations)
             self.mean_w = 0  # real width (after augmentations)
             self.mean_max_size = 0  # mean size of largest side
@@ -454,11 +492,12 @@ class CopyPasteGenerator(Dataset):
         ):
             """
             create pool from existing raw pool (e.g. for images on another - lower -
-            scale)
+            scale). For params see default constructor.
             """
             self = cls.__new__(cls)  # does not call __init__
 
             self.cat_label = parent.cat_label
+            self.cat_id = parent.cat_id
             self.augment = aug_transforms
             self.n_augment = n_augmentations
             if n_augmentations < 1:
@@ -531,16 +570,16 @@ class CopyPasteGenerator(Dataset):
             self.masks.append(mask)
 
         def init_image_stats(self) -> None:
-            shapes = np.array([x.shape[:2] for x in self.org_image_pool])
-            self.mean_h, self.mean_w = tuple(np.mean(shapes, axis=0))
-            max_sizes = np.max(shapes)
+            self.image_shapes = np.array([x.shape[:2] for x in self.masks])
+            self.mean_h, self.mean_w = tuple(np.mean(self.image_shapes, axis=0))
+            max_sizes = np.max(self.image_shapes)
             self.mean_max_size = np.mean(max_sizes)
 
         @staticmethod
         def open_image(file, min_max_size) -> np.ndarray:
             """
             open images, handles encoding and scales the larger size up to
-            min_max_size
+             min_max_size
             """
             img = cv2.imread(file, cv2.IMREAD_UNCHANGED)
 
@@ -596,24 +635,25 @@ class CopyPasteGenerator(Dataset):
                 idx = np.random.randint(0, self.__len__())
             if np.random.rand() < self.replace_prob:
                 self.replace_image(idx)
-            return self.objs[idx], self.masks[idx], self.cat_label
+            return self.objs[idx], self.masks[idx], self.cat_id
 
         def __len__(self) -> int:
             return len(self.objs)
 
-        def get_mean_height(self):
+        def get_mean_height(self) -> float:
             return self.mean_h
 
-        def get_mean_width(self):
+        def get_mean_width(self) -> float:
             return self.mean_w
 
         def visualize_augmentations(self, n_examples=3, title=None):
             """
             show example of augmentations from current image pool
             """
-            # TODO avoid scaling images by pasting into square frame etc.
             n_cols = self.n_augment if self.n_augment > 0 else 1
-            fig, axs = plt.subplots(n_examples, n_cols, figsize=(13, 8))
+            fig, axs = plt.subplots(
+                n_examples, n_cols, figsize=(3 * n_examples + 1, 3 * self.augment)
+            )
             axs = axs.reshape(-1, self.n_augment)  # in case self.n_augment == 1
             for i in range(n_examples):
                 n = np.random.randint(0, self.__len__() / self.n_augment)  # choose obj
@@ -621,14 +661,32 @@ class CopyPasteGenerator(Dataset):
                     k = n * self.n_augment + j
                     obj, mask, _ = self[k]
                     mask = cv2.bitwise_not(mask)
-                    obj[mask != 0] = (255, 255, 255)
+                    obj[mask != 0] = 255
                     obj = cv2.cvtColor(obj, cv2.COLOR_BGR2RGB)
+                    obj = self.paste_to_white_square(obj, scale_bar=True)
                     axs[i, j].axis("off")
                     axs[i, j].imshow(obj)
             if not title:
-                title = self[k][2]  # use saved name as label
+                title = f"{self.cat_label[k]}({self.cat_id})"  # use saved name as label
             fig.suptitle(title, fontsize=16)
             plt.show()
+
+        def paste_to_white_square(self, img, scale_bar=False):
+            """
+            paste images into squared frame of fixed size and a scale bar (if specified)
+            """
+            size = int(self.mean_max_size * 2.5)
+            sq = np.full((size, size, 3), 255, dtype=np.uint8)
+            h, w = img.shape[:2]
+            ymin = size // 2 - h // 2
+            xmin = size // 2 - w // 2
+            sq[ymin : ymin + h, xmin : xmin + w, :] = img
+            if scale_bar:
+                b_w = 100  # fixed value
+                b_h = int(np.ceil(0.04 * size))  # relative to frame size
+                b_x = b_y = int(size * 0.9)
+                sq[b_y - b_h : b_y, b_x - b_w : b_x, :] = 0
+            return sq
 
 
 class RandomGenerator(CopyPasteGenerator):
@@ -683,9 +741,6 @@ class RandomGenerator(CopyPasteGenerator):
             n_augmentations=n_augmentations,
             scale=scale,
         )
-        # [self.add_scaled_version(cat, scale=1/4, n_augmentations=5) for cat in self.cats]
-        # [self.add_scaled_version(cat, scale=1/8, n_augmentations=5) for cat in self.cats]
-
         self.assumed_obj_size = assumed_obj_size
         self.skip_if_overlap_func = (
             lambda obj_a, vis_a: np.random.rand() < 4 * (obj_a - vis_a) / obj_a
@@ -783,7 +838,7 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         )
         [
             self.add_scaled_version(cat, scale=2, n_augmentations=n_augmentations)
-            for cat in self.cats
+            for cat in self.cat_labels
         ]
         self.skip_if_overlap_func = (
             lambda obj_a, vis_a: np.random.rand() < 6 * (obj_a - vis_a) / obj_a
@@ -796,7 +851,7 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         Implementation of abstract place_in_rect function in parent.
         """
         # choose random cat and scale
-        cat = np.random.choice(self.cats)
+        cat = np.random.choice(self.cat_labels)
         keys = [key for key in self.patches.keys() if key.startswith(cat)]
         pool = self.patches[np.random.choice(keys)]
 
