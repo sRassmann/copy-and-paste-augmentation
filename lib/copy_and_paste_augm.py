@@ -25,15 +25,15 @@ from torch.utils.data import Dataset
 
 class PatchCreator:
 
-    """class handling cutting out objects as image patches from the image bases on
-    a COCO instance annotation file"""
+    """class handling cutting out objects as image patches from the image bases the
+    corresponding COCO instance annotation file"""
 
     # TODO refactor to opencv
     # tolerance to compensate for rounding in the bounding box representation
     xmin_tol = 1
-    xmax_tol = 2
+    xmax_tol = 1
     ymin_tol = 1
-    ymax_tol = 2
+    ymax_tol = 1
 
     def __init__(
         self,
@@ -83,9 +83,9 @@ class PatchCreator:
             xmin, ymin, w, h = tuple([int(i) for i in an["bbox"]])
             # ensure bb bounds are not outside the image frame
             x1 = max(xmin - self.xmin_tol, 0)
-            x2 = min(xmin + w + self.xmax_tol, img.shape[1] - 1)
+            x2 = min(xmin + w + self.xmax_tol + 1, img.shape[1] - 1)
             y1 = max(ymin - self.ymin_tol, 0)
-            y2 = min(ymin + h + self.ymax_tol, img.shape[0] - 1)
+            y2 = min(ymin + h + self.ymax_tol + 1, img.shape[0] - 1)
             mask = self.coco.annToMask(an)[y1:y2, x1:x2]
             if dilation:
                 mask = morphology.dilation(mask, np.ones((dilation, dilation)))
@@ -109,11 +109,13 @@ class PatchCreator:
 
 
 class CopyPasteGenerator(Dataset):
-    """Given a directory containing segmented objects (Patches) this class generates
+    """
+    Given a directory containing segmented objects (Patches) this class generates
     randomly composed images.
 
     The class is thought to be able to generate images on-the-fly in order to
-    work as dataset class."""
+    work as dataset class.
+    """
 
     # Perform no data augmentation as default
     AUGMENT = A.Compose(
@@ -191,7 +193,7 @@ class CopyPasteGenerator(Dataset):
         )
         cats = []
         bboxs = []
-        instances = []
+        instance_mask = []
 
         for r in np.random.permutation(len(rects)):
             rect_masks, rect_bbox, rect_cat = self.place_in_rect(
@@ -199,9 +201,9 @@ class CopyPasteGenerator(Dataset):
             )
             max_n_objs -= len(rect_masks)
             cats += rect_cat
-            instances += rect_masks
+            instance_mask += rect_masks
             bboxs += rect_bbox
-        return img, instances, bboxs, cats, img_mask
+        return img, instance_mask, bboxs, cats, img_mask
 
     @abstractmethod
     def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
@@ -282,7 +284,9 @@ class CopyPasteGenerator(Dataset):
         """dummy length (substitutes epoch length) for Dataset compatibility"""
         return self.length
 
-    def __getitem__(self, seed) -> (np.ndarray, list(np.ndarray), list([int, int, int, int]), [int]):
+    def __getitem__(
+        self, seed
+    ) -> (np.ndarray, [np.ndarray], [[int, int, int, int]], [int]):
         """
         Generate image with specified seed
 
@@ -290,19 +294,18 @@ class CopyPasteGenerator(Dataset):
             seed (int): seed used for np.random.seed
 
         Returns:
-            (img, image_masks, bboxs, cats):
+            (img, instance_masks, bboxs, cats):
                 img (np.ndarray): generated image (rgb)
-                image_masks (list(np.ndarray)): instance masks
+                instance_masks (list(np.ndarray)): instance masks
                 bboxs (list([int, int, int, int])): bounding boxes of generated
                 image
                 cats (list(int)): category ids of the instances
         """
         np.random.seed(seed)
-        img, image_masks, bboxs, cats, _ = self.generate()
-        return img, image_masks, bboxs, cats
+        img, instance_masks, bboxs, cats, _ = self.generate()
+        return img, instance_masks, bboxs, cats
 
     def __call__(self):
-
         img, image_masks, bboxs, cats, _ = self.generate()
         return img, image_masks, bboxs, cats
 
@@ -323,7 +326,7 @@ class CopyPasteGenerator(Dataset):
         x_min,
         y_min,
         skip_if_overlap_func=None,
-    ) -> (np.ndarray, list) or None:
+    ) -> (np.ndarray, [int, int, int, int]) or None:
         """
         Paste an object on a background image
 

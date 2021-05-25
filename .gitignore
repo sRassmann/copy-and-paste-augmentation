@@ -50,6 +50,10 @@ data/
 ## output
 output/
 
+## github
+github
+github.pub
+
 ## detectron2_repo
 detectron2_repo
 

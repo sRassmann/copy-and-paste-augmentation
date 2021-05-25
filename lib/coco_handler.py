@@ -5,6 +5,7 @@ import skimage.io as io
 import matplotlib.pyplot as plt
 import cv2
 from lib import cv2_topology_handler
+from lib import constants
 
 DESCRIPTION = "Data set for segmenting insects"
 DEFAULT_LICENSE = {
@@ -13,10 +14,10 @@ DEFAULT_LICENSE = {
     "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/",
 }
 
-__all__ = ["coco_dataset"]
+__all__ = ["CocoDataset"]
 
 
-class coco_dataset:
+class CocoDataset:
     """builds coco dataset iteratively to obtain coco annotation file"""
 
     def __init__(self, path_to_existing_coco=None, info=None, license=None):
@@ -46,6 +47,9 @@ class coco_dataset:
         self.category_name_id_dict = {
             entry["name"]: entry["id"] for entry in self.categories
         }
+        self.tmp_output_dir = os.path.join(
+            constants.path_to_output_dir, "tmp", "tmp_coco_anno.json"
+        )
 
     def find_cat_name_of_id(self, cat_id) -> list:
         return list(self.category_name_id_dict.keys())[
@@ -64,10 +68,11 @@ class coco_dataset:
         """
         creates COCO formatted instance annotation and add it to the coco file.
 
-        Objects are separated if they are not connected.
+        Objects are separated if they are in different mask images or if they are not
+        connected within the same mask.
 
         Args:
-            mask (np.ndarray): mask image or str as path to the image
+            mask (np.ndarray  or str): mask image or path to the mask
             image_name (str): name of the image file
             category_name (str): name of category
             super_category_name (str): name of super category
@@ -103,7 +108,7 @@ class coco_dataset:
                 area = cv2.contourArea(c)
                 if area > min_area:
                     self.annotations.append(
-                        coco_dataset.create_coco_segmentation(
+                        CocoDataset.create_coco_segmentation(
                             [self.cv2_contour_to_coco_annotation(c)],
                             [*cv2.boundingRect(c)],
                             area,
@@ -128,11 +133,16 @@ class coco_dataset:
         """
         creates COCO formatted instance annotation and add it to the coco file
 
-        Objects are only separated if intensity values (greyscale) differ.
-        The greyscale value is used to index category_name.
+        If a single mask is provided objects are only separated if intensity values
+         (greyscale) differ and the greyscale value is used to index category_name
+         (Note, that, in this case, the 1-based index values in the mask are converted
+         into 0-based indices for accessing the list).
+        If a list of masks is provided each mask is thought to contain a single
+        instance and the index of the mask is used to index category_names.
 
         Args:
-            mask (np.ndarray): mask image or str as path to the image
+            mask (np.ndarray or list(np.ndarray) or str): mask image, list of mask
+             images, or str as path to the mask
             image_name (str): name of the image file
             category_names (str): name of categories as list
             img_license (int): img license id
@@ -140,6 +150,19 @@ class coco_dataset:
         """
         if isinstance(mask, str):
             mask = io.imread(mask)
+        if isinstance(mask, list):  # project to single value encoded image
+            if len(mask):
+                # stack images and assign instance id as value
+                mask = np.stack(mask).astype(np.bool) * np.arange(
+                    1, len(mask) + 1
+                ).reshape(-1, 1, 1)
+                assert np.all(
+                    np.max(mask, axis=0) == np.sum(mask, axis=0)
+                ), "provided instance masks overlap"
+                mask = np.max(mask, axis=0).astype(np.uint32)
+            else:
+                mask = np.zeros((1, 1))
+
         image_id = len(self.images)
         self.images.append(
             self.create_coco_image(
@@ -188,11 +211,10 @@ class coco_dataset:
             with open(path, "w+") as f:
                 f.write(json.dumps(coco_dict, indent=4, sort_keys=False))
 
-    def show_annotations(self, data_dir="../data/raw/imgs/", cat_names="all"):
+    def show_annotations(self, data_dir=constants.path_to_imgs_dir, cat_names="all"):
         """verification method, dumps itself to json and reloads using COCO"""
-        tmp_json_path = "../output/tmp/tmp_coco_anno.json"
-        self.to_json(tmp_json_path)
-        coco = COCO(tmp_json_path)
+        self.to_json(self.tmp_output_dir)
+        coco = COCO(self.tmp_output_dir)
         if cat_names == "all":
             cat_ids = coco.getCatIds()
         else:
@@ -246,7 +268,7 @@ class coco_dataset:
                     contours, hierarchy, i
                 )  # exclude holes
                 segs.append(
-                    coco_dataset.cv2_contour_to_coco_annotation(c)
+                    CocoDataset.cv2_contour_to_coco_annotation(c)
                 )  # add contour
                 area += cv2.contourArea(c)
                 x, y, w, h = cv2.boundingRect(c)
@@ -262,7 +284,7 @@ class coco_dataset:
         y = int(np.min(outline[:, 1]))
         w = int(np.max(outline[:, 2])) - x
         h = int(np.max(outline[:, 3])) - y
-        return coco_dataset.create_coco_segmentation(
+        return CocoDataset.create_coco_segmentation(
             segs, [x, y, w, h], area, entry_id, image_id, category_id, is_crowd
         )
 
@@ -332,7 +354,7 @@ def main():
     from lib import constants
     import pandas as pd
 
-    c = coco_dataset(os.path.join(constants.path_to_anno_dir, "butterfly_anno.json"))
+    c = CocoDataset(os.path.join(constants.path_to_anno_dir, "butterfly_anno.json"))
     d = os.path.join(constants.path_to_data_dir, "bug_labelling.csv")
     d = pd.read_csv(d)
     for _, row in d.iterrows():
