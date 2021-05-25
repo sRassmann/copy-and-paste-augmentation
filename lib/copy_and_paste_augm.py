@@ -243,7 +243,6 @@ class CopyPasteGenerator(Dataset):
         backgrounds = {}
         for k, v in grid_rects.items():
             img = cv2.imread(os.path.join(self.background_dir, k))
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             assert img.shape[2] == 3
             if self.res:
                 # rescale image to max res
@@ -295,7 +294,7 @@ class CopyPasteGenerator(Dataset):
 
         Returns:
             (img, instance_masks, bboxs, cats):
-                img (np.ndarray): generated image (rgb)
+                img (np.ndarray): generated image (bgr)
                 instance_masks (list(np.ndarray)): instance masks
                 bboxs (list([int, int, int, int])): bounding boxes of generated
                 image
@@ -331,10 +330,10 @@ class CopyPasteGenerator(Dataset):
         Paste an object on a background image
 
         Args:
-            image (np.ndarray): background image (8 bit rgb)
+            image (np.ndarray): background image (8 bit bgr)
             image_mask (np.ndarray): background image mask (8 bit greyscale)
              (used for handling overlaps)
-            obj (np.ndarray): object (8 bit rgb)
+            obj (np.ndarray): object (8 bit bgr)
             obj_mask (np.ndarray): mask of the object (8 bit greyscale)
             x_min (int): minimum x coord (upper limit) of the object on the background
              image
@@ -397,7 +396,9 @@ class CopyPasteGenerator(Dataset):
         return obj_mask_full_size, coords
 
     class PatchPool:
-        """represent the pool of cached patches for on class"""
+        """
+        represent the pool of cached patches for on class
+        """
 
         # TODO implement refreshing instances in separate thread
 
@@ -451,8 +452,10 @@ class CopyPasteGenerator(Dataset):
         def create_from_existing_pool(
             cls, parent, aug_transforms=None, n_augmentations=-1, scale=0.5
         ):
-            """create pool from existing raw pool (e.g. for images on another - lower -
-            scale)"""
+            """
+            create pool from existing raw pool (e.g. for images on another - lower -
+            scale)
+            """
             self = cls.__new__(cls)  # does not call __init__
 
             self.cat_label = parent.cat_label
@@ -507,7 +510,9 @@ class CopyPasteGenerator(Dataset):
                 self.compress_and_append(obj_raw, mask_raw)
 
         def compress_and_append(self, img, mask) -> None:
-            """rescale image and mask and crop to the bounding box of the mask"""
+            """
+            rescale image and mask and crop to the bounding box of the mask
+            """
             if self.scale != 1:  # rescale obj and mask
                 img = cv2.resize(
                     img,
@@ -533,10 +538,11 @@ class CopyPasteGenerator(Dataset):
 
         @staticmethod
         def open_image(file, min_max_size) -> np.ndarray:
-            """open images, handles encoding and scales the larger size up to
-            min_max_size"""
+            """
+            open images, handles encoding and scales the larger size up to
+            min_max_size
+            """
             img = cv2.imread(file, cv2.IMREAD_UNCHANGED)
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
 
             l = max(img.shape[:2])
             if l < min_max_size:
@@ -550,7 +556,9 @@ class CopyPasteGenerator(Dataset):
 
         @staticmethod
         def crop_to_bb(obj, mask) -> (np.ndarray, np.ndarray):
-            """crop the image and its mask to obj"""
+            """
+            crop the image and its mask to obj
+            """
             x = np.nonzero(np.max(mask, axis=0))
             xmin, xmax = (np.min(x), np.max(x) + 1)
             y = np.nonzero(np.max(mask, axis=1))
@@ -561,21 +569,29 @@ class CopyPasteGenerator(Dataset):
 
         @staticmethod
         def split_image_and_mask(obj) -> (np.ndarray, np.ndarray):
-            """split 4 ch (rgba) .png into image (rgb) and mask (a)"""
+            """
+            split 4 ch (bgra) .png into image (brg) and mask (a)
+            """
             rgb = obj[:, :, :3]
             a = obj[:, :, 3]
             return rgb, a
 
         def replace_image(self, idx):
-            """replaces images at idx with new version (in new thread)"""
+            """
+            replaces images at idx with new version (in new thread)
+            """
             raise NotImplementedError
 
         def to_coco_dataset(self):
-            """generate image and convert to COCO annotation file"""
+            """
+            generate image and convert to COCO annotation file
+            """
             raise NotImplementedError
 
         def __getitem__(self, idx) -> (np.ndarray, np.ndarray):
-            """if idx out of bounds a random image is returned, img is returned as rgb"""
+            """
+            if idx out of bounds a random image is returned, img is returned as bgr
+            """
             if not 0 <= idx < self.__len__():
                 idx = np.random.randint(0, self.__len__())
             if np.random.rand() < self.replace_prob:
@@ -592,7 +608,9 @@ class CopyPasteGenerator(Dataset):
             return self.mean_w
 
         def visualize_augmentations(self, n_examples=3, title=None):
-            """show example of augmentations from current image pool"""
+            """
+            show example of augmentations from current image pool
+            """
             # TODO avoid scaling images by pasting into square frame etc.
             n_cols = self.n_augment if self.n_augment > 0 else 1
             fig, axs = plt.subplots(n_examples, n_cols, figsize=(13, 8))
@@ -604,6 +622,7 @@ class CopyPasteGenerator(Dataset):
                     obj, mask, _ = self[k]
                     mask = cv2.bitwise_not(mask)
                     obj[mask != 0] = (255, 255, 255)
+                    obj = cv2.cvtColor(obj, cv2.COLOR_BGR2RGB)
                     axs[i, j].axis("off")
                     axs[i, j].imshow(obj)
             if not title:

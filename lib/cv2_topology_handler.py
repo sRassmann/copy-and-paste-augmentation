@@ -1,7 +1,6 @@
 """
 utility funcs to handle encapsulated objects
 """
-
 import numpy as np
 
 

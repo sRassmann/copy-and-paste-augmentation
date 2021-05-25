@@ -18,7 +18,9 @@ __all__ = ["CocoDataset"]
 
 
 class CocoDataset:
-    """builds coco dataset iteratively to obtain coco annotation file"""
+    """
+    builds coco dataset iteratively to obtain coco annotation file
+    """
 
     def __init__(self, path_to_existing_coco=None, info=None, license=None):
         """
@@ -197,7 +199,9 @@ class CocoDataset:
                 self.annotations.append(ann)
 
     def to_json(self, path=None):
-        """dump obj to coco-compatible JSON String"""
+        """
+        dump obj to coco-compatible JSON String
+        """
         import json
 
         coco_dict = {
@@ -212,7 +216,9 @@ class CocoDataset:
                 f.write(json.dumps(coco_dict, indent=4, sort_keys=False))
 
     def show_annotations(self, data_dir=constants.path_to_imgs_dir, cat_names="all"):
-        """verification method, dumps itself to json and reloads using COCO"""
+        """
+        verification method, dumps itself to json and reloads using COCO
+        """
         self.to_json(self.tmp_output_dir)
         coco = COCO(self.tmp_output_dir)
         if cat_names == "all":
