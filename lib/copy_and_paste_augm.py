@@ -4,6 +4,8 @@ class offering simple copy and paste data augmentation
 Optimized to integrate with detectron2 
 """
 from abc import abstractmethod
+import warnings
+import itertools
 
 import os
 import numpy as np
@@ -118,10 +120,10 @@ class PatchCreator:
 class CopyPasteGenerator(Dataset):
     """
     Given a directory containing segmented objects (Patches) this class generates
-    randomly composed images.
+     randomly composed images.
 
     The class is thought to be able to generate images on-the-fly in order to
-    work as dataset class.
+     work as dataset class.
     """
 
     # Perform no data augmentation as default
@@ -132,13 +134,11 @@ class CopyPasteGenerator(Dataset):
 
     def __init__(
         self,
-        obj_dir,
-        background_dir,
-        background_anno="background_anno.json",
-        output_resolution=(1800, 1500),
+        patch_pool,
+        background_pool,
+        scale_augment_dict=None,
         max_n_objs=150,
-        n_augmentations=0,
-        scale=1,
+        augment=None,
     ):
         """
         Initialize abstract CopyPasteGenerator.
@@ -149,46 +149,66 @@ class CopyPasteGenerator(Dataset):
         to the individual objs and stored in RAM.
 
         Args:
-            obj_dir: path to base directory containing on directory for each obj category
-            background_dir: path to directory containing usable background images
-            background_anno: path to background image frame annotation json
-            output_resolution (int, int): target resolution of the images (if None the
-             original background image resolutions are used)
+            patch_pool (dict(PatchPool)): Dictionary of PatchPool objects
+            background_pool (BackgroundPool): Backgrounds
             max_n_objs: maximum number of objects placed in one generate image
             n_augmentations: number of augmented version per object
-            scale: rescale factor for each object
+            scale_augment_dict: dict containing each category as key and a dictionary
+             definining the number of augmentations (value) at each scale level (key).
+             See add_scale_versions for details
+            augment: Albumentations data augmentation callable
         """
-        self.res = output_resolution
-        self.background_dir = background_dir
-        self.grid_rects, self.backgrounds = self.init_backgrounds(background_anno)
-        dirs = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
-        self.cat_ids = [s.split("-")[0] for s in dirs]
-        self.cat_labels = [s.split("-")[1] for s in dirs]
         self.max_n_objs = max_n_objs
-        self.patches = self.create_patch_pool(obj_dir, n_augmentations, scale)
+        self.augment = self.AUGMENT if not augment else augment
+        self.org_pool = patch_pool
+        if scale_augment_dict:
+            self.patches = {cat: {} for cat in self.org_pool.keys()}
+            self.add_scaled_versions(scale_augment_dict)
+        else:
+            self.patches = self.init_default_patch_pool()
+        self.backgrounds = background_pool
 
-    @classmethod
-    def create_from_existing_pool(cls):
-        """
-        create Generator that uses the same raw image pool as another existing obj
-        """
-        raise NotImplementedError
-
-    def create_patch_pool(self, obj_dir, n_augmentations=0, scale=1) -> None:
-        """
-        generate patch pool dictionary
-        """
+    def init_default_patch_pool(self) -> dict:
         return {
-            cat_label: CopyPasteGenerator.PatchPool(
-                os.path.join(obj_dir, f"{cat_id}-{cat_label}"),
-                cat_id=cat_id,
-                cat_label=cat_label,
-                aug_transforms=self.AUGMENT,
-                n_augmentations=n_augmentations,
-                scale=scale,
-            )
-            for cat_id, cat_label in zip(self.cat_ids, self.cat_labels)
-        }  # get image from patch pool with self.patches[cat_name][idx]
+            cat_label: {
+                pool.scale: PatchPool.create_from_existing_pool(
+                    parent=pool, aug_transforms=self.augment, n_augmentations=1, scale=1
+                )
+            }
+            for cat_label, pool in self.org_pool.items()
+        }
+
+    def add_scaled_versions(self, scale_augment_dict) -> None:
+        """
+        wraps add_scaled_version to acept a dictionary of inputs.
+
+        Args:
+            scale_augment_dict: dict containing each category as key and a dictionary
+             definining the number of augmentations (value) at each scale level (key).
+             See the Example Input
+
+        Example Input :
+            {
+                'cat_label_1': {
+                    1: 1,  # 1 augmentation per image on scale 1
+                    1/2: 5,  # 5 augmentations per image on scale 1/2 (half size)
+                    1/4: 10,  # 10 augmentations per image on scale 1/4
+                },
+                'cat_label_2': {
+                    {1: 10},  # 10 augmentations per image on scale 1
+                    {2: 5},  # 5 augmentations per image on scale 2 (double size)
+                },
+                'cat_label_3': {},  # no augmentations added
+            }
+        """
+        for cat_label, d in scale_augment_dict.items():
+            for scale, n_aug in d.items():
+                if cat_label in self.org_pool.keys():
+                    self.add_scaled_version(cat_label, scale, n_aug)
+                else:
+                    warnings.warn(
+                        f"{cat_label} not in {self.patches.keys}, please check your category label!"
+                    )
 
     def add_scaled_version(self, cat, scale=2, n_augmentations=1) -> None:
         """
@@ -199,33 +219,35 @@ class CopyPasteGenerator(Dataset):
             scale: base scale of the patches
             n_augmentations: number of augmentations per object
         """
-        org_pool = self.patches[cat]
-        self.patches[f"{cat}-{scale}"] = self.PatchPool.create_from_existing_pool(
+        org_pool = self.org_pool[cat]
+        self.patches[cat][scale] = PatchPool.create_from_existing_pool(
             org_pool,
             aug_transforms=self.__class__.AUGMENT,
             n_augmentations=n_augmentations,
             scale=scale,
         )
 
-    def generate(self) -> (np.ndarray, [np.ndarray], [int], [str], np.ndarray):
+    def generate(
+        self, seed=None
+    ) -> (np.ndarray, [np.ndarray], [int], [str], np.ndarray):
         """
         generates image of randomly place objects
         """
+        if seed:
+            np.random.seed(seed)
         max_n_objs = self.max_n_objs
-        img, img_mask, rects = self.get_background(
-            np.random.randint(0, len(self.backgrounds))
-        )
+        img, img_mask, rects = self.backgrounds[-1]
         cats = []
         bboxs = []
         instance_mask = []
 
         for r in np.random.permutation(len(rects)):
-            rect_masks, rect_bbox, rect_cat = self.place_in_rect(
+            masks, rect_bbox, rect_cat = self.place_in_rect(
                 img, img_mask, rects[r], max_n_objs
             )
-            max_n_objs -= len(rect_masks)
+            max_n_objs -= len(masks)
             cats += rect_cat
-            instance_mask += rect_masks
+            instance_mask += masks
             bboxs += rect_bbox
         return img, instance_mask, bboxs, cats, img_mask
 
@@ -255,59 +277,6 @@ class CopyPasteGenerator(Dataset):
                 cats (list(int)): category ids of the instances
         """
         pass
-
-    def init_backgrounds(self, background_anno) -> None:
-        """
-        load background and frame annotation and rescale
-        """
-        rects = json.load(open(os.path.join(self.background_dir, background_anno)))
-        grid_rects = {
-            k: v
-            for k, v in rects.items()
-            if os.path.exists(os.path.join(self.background_dir, k))
-        }
-        backgrounds = {}
-        for k, v in grid_rects.items():
-            img = cv2.imread(os.path.join(self.background_dir, k))
-            assert img.shape[2] == 3
-            if self.res:
-                # rescale image to max res
-                fmax = max(self.res) / max(img.shape[:2])
-                fmin = min(self.res) / min(img.shape[:2])
-                rescale_factor = min(fmin, fmax)
-                img = cv2.resize(
-                    img,
-                    (
-                        int(img.shape[1] * rescale_factor),
-                        int(img.shape[0] * rescale_factor),
-                    ),
-                    interpolation=cv2.INTER_AREA,
-                )
-                assert max(*self.res) + 1 >= max(img.shape[:2])
-                assert min(*self.res) + 1 >= min(img.shape[:2])
-            backgrounds[k] = img
-            # rescale grid rectangle
-            for i, l in enumerate(grid_rects[k]):
-                x, y, w, h = l
-                xmax = (x + w) * rescale_factor
-                ymax = (y + h) * rescale_factor
-                x *= rescale_factor
-                y *= rescale_factor
-                w = xmax - x
-                h = ymax - y
-                grid_rects[k][i] = [round(x), round(y), round(w), round(h)]
-        return grid_rects, backgrounds
-
-    def get_background(self, index) -> (np.ndarray, np.ndarray, list):
-        """
-        Select random background and return it alongside the empty mask and the frame
-         rectangles.
-        """
-        key = list(self.backgrounds.keys())[index]
-        image = self.backgrounds[key].copy()
-        rects = self.grid_rects[key]
-        mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
-        return image, mask, rects
 
     def __len__(self) -> int:
         """
@@ -344,11 +313,21 @@ class CopyPasteGenerator(Dataset):
         """
         shows examples for each pool
         """
-        for cat, pool in self.patches.items():
-            pool.visualize_augmentations(3, title=cat)
+        for cat, d in self.patches.items():
+            for scale, pool in d.items():
+                pool.visualize_augmentations(3, title=f"{cat} - scale {scale}")
 
-    def get_total_pool_size(self):
-        return sum([p.__len__() for p in self.patches.values()])
+    def get_total_pool_size(self) -> int:
+        """
+        Returns:
+            number of all patches cached
+        """
+        return sum(
+            [
+                sum([len(pool) for pool in self.patches[cat].values])
+                for cat in self.patches.values()
+            ]
+        )
 
     @staticmethod
     def paste_object(
@@ -402,7 +381,6 @@ class CopyPasteGenerator(Dataset):
         # if skip_if_overlap_func is set and evaluates to True the obj is not pasted
         visible_obj_area = np.sum(obj_mask > 0)
         if skip_if_overlap_func and skip_if_overlap_func(org_area, visible_obj_area):
-            print("skipped")
             return None
 
         # select background (unchanged area of the image)
@@ -429,48 +407,55 @@ class CopyPasteGenerator(Dataset):
         coords = [x_min, y_min, w, h]
         return obj_mask_full_size, coords
 
-    class PatchPool:
+
+class PatchPool:
+    """
+    represents the pool of cached object patches for a single object category
+
+    Note, that instantiation loads and keeps ALL images in the specified dir into
+     memory.
+    """
+
+    # TODO implement refreshing instances in separate thread
+
+    def __init__(
+        self,
+        obj_dir,
+        cat_id=-1,
+        cat_label=None,
+        aug_transforms=None,
+        n_augmentations=1,
+        min_max_size=50,
+        scale=1,
+    ):
         """
-        represent the pool of cached patches for on class
+        Create PatchPool object from obj_dir to handle RAM caching for the pool of
+         patches.
+
+        Args:
+            obj_dir: parent dir of patches, all  png files are considered
+            cat_id: category id of the represented patches
+            cat_label: label of the category, will be returned together with
+             the obj and mask
+            aug_transforms: Albumentations image and mask transformation (if None
+             the images is left unchanged)
+            n_augmentations: number of augmented versions per patch (if set to 0 only
+             the raw patch pool is created)
+            min_max_size: min size of the larger patch side
+            scale: scale factor by which the patch is resized
         """
+        self.cat_label = cat_label
+        self.cat_id = cat_id
+        self.augment = aug_transforms
+        self.n_augment = n_augmentations
+        self.replace_prob = 0.0
+        self.scale = scale
 
-        # TODO implement refreshing instances in separate thread
-
-        def __init__(
-            self,
-            obj_dir,
-            cat_id=-1,
-            cat_label=None,
-            aug_transforms=None,
-            n_augmentations=1,
-            min_max_size=50,
-            scale=1,
-        ):
-            """
-            Create PatchPool object from obj_dir to handle RAM caching for the pool of
-            patches.
-
-            Args:
-                obj_dir: parent dir of patches, all  png files are considered
-                cat_id: category id of the represented patches
-                cat_label: label of the category, will be returned together with
-                 the obj and mask
-                aug_transforms: Albumentations image and mask transformation (if None
-                 the images is left unchanged)
-                n_augmentations: number of augmented versions per patch
-                min_max_size: min size of the larger patch side
-                scale: scale factor by which the patch is resized
-            """
-            self.cat_label = cat_label
-            self.cat_id = cat_id
-            self.augment = aug_transforms
-            self.n_augment = n_augmentations
-            if n_augmentations < 1:
-                self.augment = None
-                self.n_augment = 1
-            self.replace_prob = 0.0
-            self.scale = scale
-
+        self.files = glob.glob(os.path.join(obj_dir, "*png"))
+        self.org_image_pool = [
+            self.open_image(file, min_max_size) for file in self.files
+        ]
+        if n_augmentations < 1:
             self.objs = []
             self.masks = []
 
@@ -478,215 +463,285 @@ class CopyPasteGenerator(Dataset):
             self.mean_h = 0  # real height (after augmentations)
             self.mean_w = 0  # real width (after augmentations)
             self.mean_max_size = 0  # mean size of largest side
-
-            self.files = glob.glob(os.path.join(obj_dir, "*png"))
-            self.org_image_pool = [
-                self.open_image(file, min_max_size) for file in self.files
-            ]
             [self.augment_images(img) for img in self.org_image_pool]
             self.init_image_stats()
 
-        @classmethod
-        def create_from_existing_pool(
-            cls, parent, aug_transforms=None, n_augmentations=-1, scale=0.5
-        ):
-            """
-            create pool from existing raw pool (e.g. for images on another - lower -
-            scale). For params see default constructor.
-            """
-            self = cls.__new__(cls)  # does not call __init__
+    @classmethod
+    def create_from_existing_pool(
+        cls, parent, aug_transforms=None, n_augmentations=-1, scale=0.5
+    ):
+        """
+        create pool from existing raw pool (e.g. for images on another - lower -
+        scale). For params see default constructor.
+        """
+        self = cls.__new__(cls)  # does not call __init__
 
-            self.cat_label = parent.cat_label
-            self.cat_id = parent.cat_id
-            self.augment = aug_transforms
-            self.n_augment = n_augmentations
-            if n_augmentations < 1:
-                self.augment = None
-                self.n_augment = 1
-            self.replace_prob = parent.replace_prob
-            self.scale = scale
+        self.cat_label = parent.cat_label
+        self.cat_id = parent.cat_id
+        self.augment = aug_transforms
+        self.n_augment = n_augmentations
+        if n_augmentations < 1:
+            self.augment = None
+            self.n_augment = 1
+        self.replace_prob = parent.replace_prob
+        self.scale = scale
 
-            self.objs = []
-            self.masks = []
+        self.objs = []
+        self.masks = []
 
-            self.mean_h = 0  # real height (after augmentations)
-            self.mean_w = 0  # real width (after augmentations)
-            self.mean_max_size = 0  # mean size of largest side
+        self.mean_h = 0  # real height (after augmentations)
+        self.mean_w = 0  # real width (after augmentations)
+        self.mean_max_size = 0  # mean size of largest side
 
-            self.org_image_pool = parent.org_image_pool  # use same original pool
-            self.files = parent.files.copy()  # currently unused, required for reloading
-            [self.augment_images(img) for img in self.org_image_pool]
-            self.init_image_stats()
-            return self
+        self.org_image_pool = parent.org_image_pool  # use same original pool
+        self.files = parent.files.copy()  # currently unused, required for reloading
+        [self.augment_images(img) for img in self.org_image_pool]
+        self.init_image_stats()
+        return self
 
-        def augment_images(self, obj_raw) -> None:
-            """performs self.n_augment random augmentations, appends the resulting
-            images to the pool, and crops images and masks to the object bounding
-            box"""
-            obj_raw, mask_raw = self.split_image_and_mask(obj_raw)
+    def augment_images(self, obj_raw) -> None:
+        """performs self.n_augment random augmentations, appends the resulting
+        images to the pool, and crops images and masks to the object bounding
+        box"""
+        obj_raw, mask_raw = self.split_image_and_mask(obj_raw)
 
-            if self.augment:
-                h, w = obj_raw.shape[:2]
-                l = max(h, w)
-                ymin, xmin = (l - h // 2, l - w // 2)
-                ymax, xmax = (ymin + h, xmin + w)
+        if self.augment:
+            h, w = obj_raw.shape[:2]
+            l = max(h, w)
+            ymin, xmin = (l - h // 2, l - w // 2)
+            ymax, xmax = (ymin + h, xmin + w)
 
-                # pad images
-                obj_pad = np.zeros((l * 2, l * 2, 3), dtype=np.uint8)
-                obj_pad[ymin:ymax, xmin:xmax, :] = obj_raw
-                mask_pad = np.zeros((l * 2, l * 2), dtype=np.uint8)
-                mask_pad[ymin:ymax, xmin:xmax] = mask_raw
+            # pad images
+            obj_pad = np.zeros((l * 2, l * 2, 3), dtype=np.uint8)
+            obj_pad[ymin:ymax, xmin:xmax, :] = obj_raw
+            mask_pad = np.zeros((l * 2, l * 2), dtype=np.uint8)
+            mask_pad[ymin:ymax, xmin:xmax] = mask_raw
 
-                # augment
-                for _ in range(self.n_augment):
-                    t = self.augment(image=obj_pad, mask=mask_pad)
-                    obj = t["image"]
-                    mask = t["mask"]
-                    assert obj.dtype == np.uint8
-                    assert mask.dtype == np.uint8
-                    self.compress_and_append(obj, mask)
-            else:
-                self.compress_and_append(obj_raw, mask_raw)
+            # augment
+            for _ in range(self.n_augment):
+                t = self.augment(image=obj_pad, mask=mask_pad)
+                obj = t["image"]
+                mask = t["mask"]
+                assert obj.dtype == np.uint8
+                assert mask.dtype == np.uint8
+                self.compress_and_append(obj, mask)
+        else:
+            self.compress_and_append(obj_raw, mask_raw)
 
-        def compress_and_append(self, img, mask) -> None:
-            """
-            rescale image and mask and crop to the bounding box of the mask
-            """
-            if self.scale != 1:  # rescale obj and mask
-                img = cv2.resize(
-                    img,
-                    (img.shape[1] * self.scale, img.shape[0] * self.scale),
-                    interpolation=cv2.INTER_AREA,
-                )
-                mask = cv2.resize(
-                    mask,
-                    (mask.shape[1] * self.scale, mask.shape[0] * self.scale),
-                    interpolation=cv2.INTER_AREA,
-                )
-
-            # crop to bounding box of augmented mask
-            img, mask = self.crop_to_bb(img, mask)
-            self.objs.append(img)
-            self.masks.append(mask)
-
-        def init_image_stats(self) -> None:
-            self.image_shapes = np.array([x.shape[:2] for x in self.masks])
-            self.mean_h, self.mean_w = tuple(np.mean(self.image_shapes, axis=0))
-            max_sizes = np.max(self.image_shapes)
-            self.mean_max_size = np.mean(max_sizes)
-
-        @staticmethod
-        def open_image(file, min_max_size) -> np.ndarray:
-            """
-            open images, handles encoding and scales the larger size up to
-             min_max_size
-            """
-            img = cv2.imread(file, cv2.IMREAD_UNCHANGED)
-
-            l = max(img.shape[:2])
-            if l < min_max_size:
-                rescale_factor = int(2 ** np.ceil(-np.log2(l / min_max_size)))
-                img = cv2.resize(
-                    img,
-                    (img.shape[1] * rescale_factor, img.shape[0] * rescale_factor),
-                    interpolation=cv2.INTER_AREA,
-                )
-            return img
-
-        @staticmethod
-        def crop_to_bb(obj, mask) -> (np.ndarray, np.ndarray):
-            """
-            crop the image and its mask to obj
-            """
-            x = np.nonzero(np.max(mask, axis=0))
-            xmin, xmax = (np.min(x), np.max(x) + 1)
-            y = np.nonzero(np.max(mask, axis=1))
-            ymin, ymax = (np.min(y), np.max(y) + 1)
-            obj = obj[ymin:ymax, xmin:xmax, :]
-            mask = mask[ymin:ymax, xmin:xmax]
-            return obj, mask
-
-        @staticmethod
-        def split_image_and_mask(obj) -> (np.ndarray, np.ndarray):
-            """
-            split 4 ch (bgra) .png into image (brg) and mask (a)
-            """
-            rgb = obj[:, :, :3]
-            a = obj[:, :, 3]
-            return rgb, a
-
-        def replace_image(self, idx):
-            """
-            replaces images at idx with new version (in new thread)
-            """
-            raise NotImplementedError
-
-        def to_coco_dataset(self):
-            """
-            generate image and convert to COCO annotation file
-            """
-            raise NotImplementedError
-
-        def __getitem__(self, idx) -> (np.ndarray, np.ndarray):
-            """
-            if idx out of bounds a random image is returned, img is returned as bgr
-            """
-            if not 0 <= idx < self.__len__():
-                idx = np.random.randint(0, self.__len__())
-            if np.random.rand() < self.replace_prob:
-                self.replace_image(idx)
-            return self.objs[idx], self.masks[idx], self.cat_id
-
-        def __len__(self) -> int:
-            return len(self.objs)
-
-        def get_mean_height(self) -> float:
-            return self.mean_h
-
-        def get_mean_width(self) -> float:
-            return self.mean_w
-
-        def visualize_augmentations(self, n_examples=3, title=None):
-            """
-            show example of augmentations from current image pool
-            """
-            n_cols = self.n_augment if self.n_augment > 0 else 1
-            fig, axs = plt.subplots(
-                n_examples, n_cols, figsize=(3 * n_examples + 1, 3 * self.augment)
+    def compress_and_append(self, img, mask) -> None:
+        """
+        rescale image and mask and crop to the bounding box of the mask
+        """
+        if self.scale != 1:  # rescale obj and mask
+            img = cv2.resize(
+                img,
+                (int(img.shape[1] * self.scale), int(img.shape[0] * self.scale)),
+                interpolation=cv2.INTER_AREA,
             )
-            axs = axs.reshape(-1, self.n_augment)  # in case self.n_augment == 1
-            for i in range(n_examples):
-                n = np.random.randint(0, self.__len__() / self.n_augment)  # choose obj
-                for j in range(self.n_augment):
-                    k = n * self.n_augment + j
-                    obj, mask, _ = self[k]
-                    mask = cv2.bitwise_not(mask)
-                    obj[mask != 0] = 255
-                    obj = cv2.cvtColor(obj, cv2.COLOR_BGR2RGB)
-                    obj = self.paste_to_white_square(obj, scale_bar=True)
-                    axs[i, j].axis("off")
-                    axs[i, j].imshow(obj)
-            if not title:
-                title = f"{self.cat_label[k]}({self.cat_id})"  # use saved name as label
-            fig.suptitle(title, fontsize=16)
-            plt.show()
+            mask = cv2.resize(
+                mask,
+                (int(mask.shape[1] * self.scale), int(mask.shape[0] * self.scale)),
+                interpolation=cv2.INTER_AREA,
+            )
 
-        def paste_to_white_square(self, img, scale_bar=False):
-            """
-            paste images into squared frame of fixed size and a scale bar (if specified)
-            """
-            size = int(self.mean_max_size * 2.5)
-            sq = np.full((size, size, 3), 255, dtype=np.uint8)
-            h, w = img.shape[:2]
-            ymin = size // 2 - h // 2
-            xmin = size // 2 - w // 2
-            sq[ymin : ymin + h, xmin : xmin + w, :] = img
-            if scale_bar:
-                b_w = 100  # fixed value
-                b_h = int(np.ceil(0.04 * size))  # relative to frame size
-                b_x = b_y = int(size * 0.9)
-                sq[b_y - b_h : b_y, b_x - b_w : b_x, :] = 0
-            return sq
+        # crop to bounding box of augmented mask
+        img, mask = self.crop_to_bb(img, mask)
+        self.objs.append(img)
+        self.masks.append(mask)
+
+    def init_image_stats(self) -> None:
+        self.image_shapes = np.array([x.shape[:2] for x in self.masks])
+        self.mean_h, self.mean_w = tuple(np.mean(self.image_shapes, axis=0))
+        max_sizes = np.max(self.image_shapes)
+        self.mean_max_size = np.mean(max_sizes)
+
+    @staticmethod
+    def open_image(file, min_max_size) -> np.ndarray:
+        """
+        open images, handles encoding and scales the larger size up to
+         min_max_size
+        """
+        img = cv2.imread(file, cv2.IMREAD_UNCHANGED)
+
+        l = max(img.shape[:2])
+        if l < min_max_size:
+            rescale_factor = int(2 ** np.ceil(-np.log2(l / min_max_size)))
+            img = cv2.resize(
+                img,
+                (img.shape[1] * rescale_factor, img.shape[0] * rescale_factor),
+                interpolation=cv2.INTER_AREA,
+            )
+        return img
+
+    @staticmethod
+    def crop_to_bb(obj, mask) -> (np.ndarray, np.ndarray):
+        """
+        crop the image and its mask to obj
+        """
+        x = np.nonzero(np.max(mask, axis=0))
+        xmin, xmax = (np.min(x), np.max(x) + 1)
+        y = np.nonzero(np.max(mask, axis=1))
+        ymin, ymax = (np.min(y), np.max(y) + 1)
+        obj = obj[ymin:ymax, xmin:xmax, :]
+        mask = mask[ymin:ymax, xmin:xmax]
+        return obj, mask
+
+    @staticmethod
+    def split_image_and_mask(obj) -> (np.ndarray, np.ndarray):
+        """
+        split 4 ch (bgra) .png into image (brg) and mask (a)
+        """
+        rgb = obj[:, :, :3]
+        a = obj[:, :, 3]
+        return rgb, a
+
+    def replace_image(self, idx) -> None:
+        """
+        replaces images at idx with new version (in new thread)
+        """
+        raise NotImplementedError
+
+    def __getitem__(self, idx) -> (np.ndarray, np.ndarray):
+        """
+        if idx out of bounds a random image is returned, img is returned as bgr
+        """
+        if not 0 <= idx < self.__len__():
+            idx = np.random.randint(0, self.__len__())
+        if np.random.rand() < self.replace_prob:
+            self.replace_image(idx)
+        return self.objs[idx], self.masks[idx], self.cat_id
+
+    def __len__(self) -> int:
+        return len(self.objs)
+
+    def get_mean_height(self) -> float:
+        return self.mean_h
+
+    def get_mean_width(self) -> float:
+        return self.mean_w
+
+    def visualize_augmentations(self, n_examples=3, title=None):
+        """
+        show example of augmentations from current image pool
+        """
+        n_cols = self.n_augment if self.n_augment > 0 else 1
+        fig, axs = plt.subplots(
+            n_examples, n_cols, figsize=(3 * self.n_augment + 1, 3 * n_examples)
+        )
+        axs = axs.reshape(-1, self.n_augment)  # in case self.n_augment == 1
+        for i in range(n_examples):
+            n = np.random.randint(0, self.__len__() / self.n_augment)  # choose obj
+            for j in range(self.n_augment):
+                k = n * self.n_augment + j
+                obj, mask, _ = self[k]
+                mask = cv2.bitwise_not(mask)
+                obj[mask != 0] = 255
+                obj = cv2.cvtColor(obj, cv2.COLOR_BGR2RGB)
+                obj = self.paste_to_white_square(obj, scale_bar=True)
+                axs[i, j].axis("off")
+                axs[i, j].imshow(obj)
+        if not title:
+            title = f"{self.cat_label[k]}({self.cat_id})"  # use saved name as label
+        fig.suptitle(title, fontsize=16)
+        plt.show()
+
+    def paste_to_white_square(self, img, scale_bar=False):
+        """
+        paste images into squared frame of fixed size and a scale bar (if specified)
+        """
+        size = max(int(self.mean_max_size * 2.5), 120)
+        sq = np.full((size, size, 3), 255, dtype=np.uint8)
+        h, w = img.shape[:2]
+        ymin = size // 2 - h // 2
+        xmin = size // 2 - w // 2
+        sq[ymin : ymin + h, xmin : xmin + w, :] = img
+        if scale_bar:
+            b_w = 100  # fixed value
+            b_h = int(np.ceil(0.04 * size))  # relative to frame size
+            b_x = b_y = int(size * 0.9)
+            sq[b_y - b_h : b_y, b_x - b_w : b_x, :] = 0
+        return sq
+
+
+class BackgroundPool:
+    """
+    represents the pool of cached background images.
+
+    Note, that instantiation loads and keeps ALL images in the specified dir into
+     memory.
+    """
+
+    def __init__(
+        self,
+        background_dir,
+        background_anno="background_anno.json",
+        max_resolution=(1800, 1500),
+    ):
+        """
+        loads backgrounds and frame annotation and rescales them to the defined maximum
+         resolution
+
+        Args:
+            background_dir: path to directory containing usable background images
+            background_anno: path to background image frame annotation JSON
+            max_resolution (int, int): maximum target resolution of the images (if None
+             the original background image resolution is used)
+        """
+        self.res = max_resolution
+        self.background_dir = background_dir
+        rects = json.load(open(os.path.join(self.background_dir, background_anno)))
+        self.grid_rects = {
+            k: v
+            for k, v in rects.items()
+            if os.path.exists(os.path.join(self.background_dir, k))
+        }
+
+        self.backgrounds = {}
+        for k, v in self.grid_rects.items():
+            img = cv2.imread(os.path.join(self.background_dir, k))
+            assert img.shape[2] == 3
+            if self.res:
+                # rescale image to max res
+                fmax = max(self.res) / max(img.shape[:2])
+                fmin = min(self.res) / min(img.shape[:2])
+                rescale_factor = min(fmin, fmax)
+                img = cv2.resize(
+                    img,
+                    (
+                        int(img.shape[1] * rescale_factor),
+                        int(img.shape[0] * rescale_factor),
+                    ),
+                    interpolation=cv2.INTER_AREA,
+                )
+                assert max(*self.res) + 1 >= max(img.shape[:2])
+                assert min(*self.res) + 1 >= min(img.shape[:2])
+            self.backgrounds[k] = img
+            # rescale grid rectangle
+            for i, l in enumerate(self.grid_rects[k]):
+                x, y, w, h = l
+                xmax = (x + w) * rescale_factor
+                ymax = (y + h) * rescale_factor
+                x *= rescale_factor
+                y *= rescale_factor
+                w = xmax - x
+                h = ymax - y
+                self.grid_rects[k][i] = [round(x), round(y), round(w), round(h)]
+
+    def __len__(self):
+        return len(self.backgrounds)
+
+    def __getitem__(self, idx=-1) -> (np.ndarray, np.ndarray, list):
+        """
+        Selects the background at position of index (random if index out of bounds) and
+         returns it alongside the empty mask and the frame rectangles.
+        """
+        if not 0 <= idx < self.__len__():
+            idx = np.random.randint(0, self.__len__())
+        key = list(self.backgrounds.keys())[idx]
+        image = self.backgrounds[key].copy()
+        rects = self.grid_rects[key]
+        mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+        return image, mask, rects
 
 
 class RandomGenerator(CopyPasteGenerator):
@@ -717,13 +772,10 @@ class RandomGenerator(CopyPasteGenerator):
 
     def __init__(
         self,
-        obj_dir,
-        background_dir,
-        background_anno="background_anno.json",
-        output_resolution=(1800, 1500),
+        patch_pool,
+        background_pool,
+        scale_augment_dict=None,
         max_n_objs=150,
-        n_augmentations=5,
-        scale=1,
         assumed_obj_size=300 * 300,
     ):
         """
@@ -733,13 +785,10 @@ class RandomGenerator(CopyPasteGenerator):
             assumed_obj_size: heuristic parameter to specify object density
         """
         super().__init__(
-            obj_dir,
-            background_dir,
-            background_anno=background_anno,
-            output_resolution=output_resolution,
+            patch_pool,
+            background_pool,
+            scale_augment_dict=scale_augment_dict,
             max_n_objs=max_n_objs,
-            n_augmentations=n_augmentations,
-            scale=scale,
         )
         self.assumed_obj_size = assumed_obj_size
         self.skip_if_overlap_func = (
@@ -750,25 +799,19 @@ class RandomGenerator(CopyPasteGenerator):
         """
         Implementation of abstract place_in_rect function in parent.
         """
-        # create list of objs from different pools (-> cats)
-        artificial_pool = []
-
-        rect_x, rect_y, rect_w, rect_h = frame_rect
-        n_obj = rect_h * rect_w // self.assumed_obj_size  # heuristic param for obj size
-
-        for i in range(n_obj):
-            cat = np.random.choice(list(self.patches.keys()))
-            pool = self.patches[cat]
-            artificial_pool.append(pool[np.random.randint(0, len(pool))])
-
         full_size_masks = []
         bounding_boxes = []
         cats = []
 
-        for i, p in enumerate(artificial_pool):
-            if i > max_n_objs:
-                break
-            obj, obj_mask, cat = p
+        rect_x, rect_y, rect_w, rect_h = frame_rect
+        n_obj = rect_h * rect_w // self.assumed_obj_size  # heuristic param for obj size
+        n_obj = max(np.random.normal(1, 1) * n_obj, 0)
+
+        for i in range(int(min(max_n_objs, n_obj))):
+            cat = np.random.choice([cat for cat in self.patches if self.patches[cat]])
+            scale = np.random.choice(list(self.patches[cat]))
+
+            obj, obj_mask, cat = self.patches[cat][scale][-1]
             if rect_w - obj.shape[1] < 0 or rect_h - obj.shape[0] < 0:
                 continue
             x = np.random.randint(rect_x, rect_x + rect_w - obj.shape[1])
@@ -812,14 +855,12 @@ class CollectionBoxGenerator(CopyPasteGenerator):
 
     def __init__(
         self,
-        obj_dir,
-        background_dir,
-        background_anno="background_anno.json",
-        output_resolution=(1800, 1500),
+        patch_pool,
+        background_pool,
+        scale_augment_dict=None,
         max_n_objs=150,
-        n_augmentations=5,
-        scale=1,
         grid_pos_jitter=0.2,
+        space_jitter=(0.6, 1.2),
     ):
         """
         Extends overwritten init methods with the following args
@@ -828,35 +869,30 @@ class CollectionBoxGenerator(CopyPasteGenerator):
             grid_pos_jitter: heuristic parameter to specify jitter within the
         """
         super().__init__(
-            obj_dir,
-            background_dir,
-            background_anno=background_anno,
-            output_resolution=output_resolution,
+            patch_pool,
+            background_pool,
+            scale_augment_dict=scale_augment_dict,
             max_n_objs=max_n_objs,
-            n_augmentations=n_augmentations,
-            scale=scale,
         )
-        [
-            self.add_scaled_version(cat, scale=2, n_augmentations=n_augmentations)
-            for cat in self.cat_labels
-        ]
         self.skip_if_overlap_func = (
             lambda obj_a, vis_a: np.random.rand() < 6 * (obj_a - vis_a) / obj_a
         )
-        self.skip_if_overlap_func = None
-        self.jitter = grid_pos_jitter
+        self.grid_jitter = grid_pos_jitter
+        self.space_jitter = space_jitter
 
     def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
         """
         Implementation of abstract place_in_rect function in parent.
         """
-        # choose random cat and scale
-        cat = np.random.choice(self.cat_labels)
-        keys = [key for key in self.patches.keys() if key.startswith(cat)]
-        pool = self.patches[np.random.choice(keys)]
+        # choose random cat and scale (equival p for each cat and each scale within each cat
+        cat = np.random.choice([cat for cat in self.patches if self.patches[cat]])
+        scale = np.random.choice(list(self.patches[cat]))
+        pool = self.patches[cat][scale]
 
         rect_x, rect_y, rect_w, rect_h = frame_rect
         av_w, av_h = pool.get_mean_width(), pool.get_mean_height()
+        av_w *= np.random.uniform(self.space_jitter[0], self.space_jitter[1])
+        av_h *= np.random.uniform(self.space_jitter[0], self.space_jitter[1])
         grid_n_x = rect_w // int(av_w)
         grid_n_y = rect_h // int(av_h)
 
@@ -864,57 +900,81 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         bounding_boxes = []
         cats = []
 
-        k = 0
-        for j in range(grid_n_x - 1):
-            for i in range(grid_n_y - 1):
-                k += 1
-                obj, obj_mask, cat = pool[-1]  # get random patch
+        for i, j in itertools.product(range(grid_n_y), range(grid_n_x)):
+            if len(full_size_masks) >= max_n_objs:
+                break
+            obj, obj_mask, cat = pool[-1]  # get random patch
 
-                # calculate location of the center
-                x = rect_x + j * av_w + av_w // 2
-                y = rect_y + i * av_h + av_h // 2
+            # calculate location of the center
+            x = rect_x + j * av_w + av_w // 2
+            y = rect_y + i * av_h + av_h // 2
 
-                # calculate left / lower limit and add some jitter
-                x -= np.random.normal(obj.shape[1] / 2, self.jitter)
-                y -= np.random.normal(obj.shape[0] / 2, self.jitter)
-                x, y = int(x), int(y)
+            # calculate left / lower limit and add some jitter
+            x -= np.random.normal(obj.shape[1] / 2, self.grid_jitter)
+            y -= np.random.normal(obj.shape[0] / 2, self.grid_jitter)
+            x, y = int(x), int(y)
 
-                # check if the instance is still in the frame
-                if (
-                    x + obj.shape[1] > rect_x + rect_w
-                    or y + obj.shape[0] > rect_y + rect_h
-                    or x < rect_x
-                    or y < rect_y
-                ):
-                    continue
+            # check if the instance is still in the frame
+            if (
+                x + obj.shape[1] > rect_x + rect_w
+                or y + obj.shape[0] > rect_y + rect_h
+                or x < rect_x
+                or y < rect_y
+            ):
+                continue
 
-                pasted = self.paste_object(
-                    image, image_mask, obj, obj_mask, x, y, self.skip_if_overlap_func
-                )
-                if pasted:
-                    full_size_mask, bb = pasted
-                    full_size_masks.append(full_size_mask)
-                    bounding_boxes.append(bb)
-                    cats.append(cat)
+            pasted = self.paste_object(
+                image, image_mask, obj, obj_mask, x, y, self.skip_if_overlap_func
+            )
+            if pasted:
+                full_size_mask, bb = pasted
+                full_size_masks.append(full_size_mask)
+                bounding_boxes.append(bb)
+                cats.append(cat)
         return full_size_masks, bounding_boxes, cats
 
 
 def main():
-    cpg = CollectionBoxGenerator(
-        os.path.join(constants.path_to_copy_and_paste, "objs"),
-        os.path.join(constants.path_to_copy_and_paste, "backgrounds"),
-        n_augmentations=1,
-        grid_pos_jitter=0.05,
+    obj_dir = os.path.join(constants.path_to_copy_and_paste, "objs")
+    dirs = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
+    cat_ids = [s.split("-")[0] for s in dirs]
+    cat_labels = [s.split("-")[1] for s in dirs]
+    # create patch pool dict
+    patch_pool = {
+        cat_label: PatchPool(
+            os.path.join(obj_dir, f"{cat_id}-{cat_label}"),
+            cat_id=cat_id,
+            cat_label=cat_label,
+            aug_transforms=None,
+            n_augmentations=0,  # only create Pool
+            scale=1,
+        )
+        for cat_id, cat_label in zip(cat_ids, cat_labels)
+    }
+
+    background_pool = BackgroundPool(
+        background_dir=os.path.join(constants.path_to_copy_and_paste, "backgrounds"),
+        background_anno="background_anno.json",
+        max_resolution=(1800, 1500),
     )
-    cpg.add_scaled_version("Smerinthus ocellata", 2, 10)
-    cpg.add_scaled_version("bug", 2, 3)
-    print(cpg.get_total_pool_size())
-    for _ in range(10):
-        img, image_masks, bboxs, cats, image_mask = cpg.generate()
-        plt.imshow(img)
+
+    d = {
+        "Mesembryhmus_purpuralis": {1: 5, 0.25: 5},
+        "Smerinthus_ocellata": {1: 5, 1 / 2: 5},
+        "Acherontia_atroposa": {1: 5, 1 / 4: 3},
+        "bug_proxy_2": {1: 3},
+        "bug_proxy_3": {1: 3},
+        "bug_proxy_1": {1: 3, 4: 2},
+        "Trichotichnus": {1: 3, 4: 2},
+    }
+
+    cpg = RandomGenerator(patch_pool, background_pool, d, max_n_objs=150)
+    # cpg.visualize_pool()
+    for i in range(10):
+        img, image_masks, bboxs, cats, image_mask = cpg.generate(i)
+        plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        plt.title(len(image_masks))
         plt.show()
-        plt.imshow(image_mask)
-    cpg.visualize_pool()
 
 
 if __name__ == "__main__":
