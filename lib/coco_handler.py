@@ -1,7 +1,6 @@
 import os
 from pycocotools.coco import COCO
 import numpy as np
-import skimage.io as io
 import matplotlib.pyplot as plt
 import cv2
 from lib import cv2_topology_handler
@@ -82,7 +81,7 @@ class CocoDataset:
             min_area (int): minimum object area to be considered
         """
         if isinstance(mask, str):
-            mask = io.imread(mask)
+            mask = cv2.imread(mask, cv2.IMREAD_GRAYSCALE)
         image_id = len(self.images)
         self.images.append(
             self.create_coco_image(
@@ -151,7 +150,7 @@ class CocoDataset:
             min_area (int): minimum object area to be considered
         """
         if isinstance(mask, str):
-            mask = io.imread(mask)
+            mask = cv2.imread(mask, cv2.IMREAD_GRAYSCALE)
         if isinstance(mask, list):  # project to single value encoded image
             if len(mask):
                 # stack images and assign instance id as value
@@ -228,7 +227,8 @@ class CocoDataset:
         for i in coco.imgs:
             annIds = coco.getAnnIds(imgIds=i, catIds=cat_ids, iscrowd=None)
             anns = coco.loadAnns(annIds)
-            img = io.imread(os.path.join(data_dir, coco.imgs[i]["file_name"]))
+            img = cv2.imread(os.path.join(data_dir, coco.imgs[i]["file_name"]))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             plt.figure(figsize=(10, 15))
             plt.axis("off")
             plt.imshow(img)

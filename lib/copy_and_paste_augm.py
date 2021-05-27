@@ -9,20 +9,14 @@ import itertools
 
 import os
 import numpy as np
-from skimage import morphology
 from tqdm import tqdm
-from PIL import Image
 import json
-
-import lib.constants as constants
-
 import glob
 import cv2
-
 import albumentations as A
-import matplotlib.pyplot as plt
-
 from torch.utils.data import Dataset
+
+import lib.constants as constants
 
 
 class PatchCreator:
@@ -32,26 +26,21 @@ class PatchCreator:
 
     # TODO refactor to opencv
     # tolerance to compensate for rounding in the bounding box representation
-    xmin_tol = 1
-    xmax_tol = 1
-    ymin_tol = 1
-    ymax_tol = 1
+    frame_tol = 5
 
     def __init__(
         self,
         coco,
         img_dir=constants.path_to_imgs_dir,
         output_dir=os.path.join(constants.path_to_output_dir, "patches"),
-        save_patches=True,
     ):
         """
         create Callable PatchCreator
 
         Args:
             coco (pycocotools.coco.COCO): loaded coco istance annotation
-            img_dir: base dir of raw images
-            output_dir: dst dir for output
-            save_patches: Save patches
+            img_dir (str): base dir of raw images
+            output_dir (str): dst dir for output
         """
         self.img_dir = img_dir
         self.output_dir = output_dir
@@ -64,21 +53,20 @@ class PatchCreator:
                 exist_ok=True,
             )
             self.cat_indices[cat["name"]] = 0  # count number of objects for indexing
-            self.average_sizes[cat["name"]] = (0, 0)  # average over sizes
         self.cat_ids = coco.getCatIds()
-        self.save = save_patches
 
-    def __call__(self, coco_image, dilation=None) -> None:
+    def __call__(self, coco_image, dilation=None, blurr=None) -> None:
         """
         create patches from coco image
 
         Args:
             coco_image: coco.imgs entry
             dilation: amount of morphological mask dilation
+            blurr: sigma for a kernel for a Gaussian Blurr
         """
-        img = Image.open(os.path.join(self.img_dir, coco_image["file_name"]))
-        img = img.convert("RGBA")
-        img = np.asarray(img.convert("RGBA"))
+        img_path = os.path.join(self.img_dir, coco_image["file_name"])
+        img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2RGBA)
 
         anns_ids = self.coco.getAnnIds(imgIds=coco_image["id"], iscrowd=None)
         anns = self.coco.loadAnns(anns_ids)
@@ -87,13 +75,19 @@ class PatchCreator:
             # crop bb from masks and images
             xmin, ymin, w, h = tuple([int(i) for i in an["bbox"]])
             # ensure bb bounds are not outside the image frame
-            x1 = max(xmin - self.xmin_tol, 0)
-            x2 = min(xmin + w + self.xmax_tol + 1, img.shape[1] - 1)
-            y1 = max(ymin - self.ymin_tol, 0)
-            y2 = min(ymin + h + self.ymax_tol + 1, img.shape[0] - 1)
-            mask = self.coco.annToMask(an)[y1:y2, x1:x2]
+            x1 = max(xmin - self.frame_tol, 0)
+            x2 = min(xmin + w + self.frame_tol + 1, img.shape[1] - 1)
+            y1 = max(ymin - self.frame_tol, 0)
+            y2 = min(ymin + h + self.frame_tol + 1, img.shape[0] - 1)
+            mask = self.coco.annToMask(an)
+            mask = mask[y1:y2, x1:x2]  # crop to bb + tolerance
             if dilation:
-                mask = morphology.dilation(mask, np.ones((dilation, dilation)))
+                kernel = np.ones((dilation, dilation))
+                mask = cv2.dilate(mask, kernel, np.ones((dilation, dilation)))
+            if blurr:
+                mask = cv2.GaussianBlur(
+                    mask, (blurr * 2 + 1, blurr * 2 + 1), blurr, blurr
+                )  # smooth mask for alpha blending
             obj = img[y1:y2, x1:x2].copy()
 
             # set unmasked corners to transparent
@@ -103,17 +97,13 @@ class PatchCreator:
             cat = self.coco.loadCats(ids=[an["category_id"]])[0]["name"]
             i = self.cat_indices[cat] + 1
             self.cat_indices[cat] = i
-            if self.save:
-                Image.fromarray(obj).save(
-                    os.path.join(
-                        self.output_dir,
-                        f"{an['category_id']}-{cat}",
-                        f"{cat}(id_{an['category_id']})-{i}-{an['id']}.png",
-                    )
-                )
-            self.average_sizes[cat] = (
-                (self.average_sizes[cat][0] * (i - 1) + w) / i,
-                (self.average_sizes[cat][1] * (i - 1) + h) / i,
+            cv2.imwrite(
+                os.path.join(
+                    self.output_dir,
+                    f"{an['category_id']}-{cat}",
+                    f"{cat}(id_{an['category_id']})-{i}-{an['id']}.png",
+                ),
+                obj,
             )
 
 
@@ -391,9 +381,9 @@ class CopyPasteGenerator(Dataset):
         bg = image[y_min:y_max, x_min:x_max]  # relevant rectangle of org image
 
         # place on obj and mask
-        alpha = np.stack([obj_mask / (2 ** 8 - 1)]*3, axis=2)
+        alpha = np.stack([obj_mask / (2 ** 8 - 1)] * 3, axis=2)
         image[y_min:y_max, x_min:x_max] = (
-            obj * alpha + image[y_min:y_max, x_min:x_max] * (1-alpha)
+            obj * alpha + image[y_min:y_max, x_min:x_max] * (1 - alpha)
         ).astype(np.uint8)
         obj_mask = cv2.threshold(obj_mask, mask_thresh, 255, cv2.THRESH_BINARY)[1]
         image_mask[y_min:y_max, x_min:x_max] = cv2.bitwise_or(
@@ -418,6 +408,7 @@ class PatchPool:
     """
 
     # TODO implement refreshing instances in separate thread
+    # TODO implement blurring of the mask for alpha blending
 
     def __init__(
         self,
