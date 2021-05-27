@@ -242,13 +242,11 @@ class CopyPasteGenerator(Dataset):
         instance_mask = []
 
         for r in np.random.permutation(len(rects)):
-            masks, rect_bbox, rect_cat = self.place_in_rect(
-                img, img_mask, rects[r], max_n_objs
-            )
+            masks, bbox, cat = self.place_in_rect(img, img_mask, rects[r], max_n_objs)
             max_n_objs -= len(masks)
-            cats += rect_cat
+            cats += cat
             instance_mask += masks
-            bboxs += rect_bbox
+            bboxs += bbox
         return img, instance_mask, bboxs, cats, img_mask
 
     @abstractmethod
@@ -347,7 +345,11 @@ class CopyPasteGenerator(Dataset):
             image_mask (np.ndarray): background image mask (8 bit greyscale)
              (used for handling overlaps)
             obj (np.ndarray): object (8 bit bgr)
-            obj_mask (np.ndarray): mask of the object (8 bit greyscale)
+            obj_mask (np.ndarray): mask of the object (8 bit greyscale). The mask is
+             used (1) as alpha parameter to wheight alpha blending between the object
+             and the background (can be used to smooth image borders) and (2) to
+             determine the ground truth mask (mask values of >= 128 are considered
+             positive)
             x_min (int): minimum x coord (upper limit) of the object on the background
              image
             y_min (int): minimum y (left limit) coord of the object on the background
@@ -365,6 +367,8 @@ class CopyPasteGenerator(Dataset):
         assert obj.dtype == np.uint8 and obj.shape[2] == 3
         assert obj_mask.dtype == np.uint8
 
+        mask_thresh = 2 ** 7 - 1  # mask threshold
+
         h, w = obj.shape[0], obj.shape[1]
         x_max = x_min + w
         y_max = y_min + h
@@ -373,10 +377,10 @@ class CopyPasteGenerator(Dataset):
             return None
 
         # handle overlap --> only place the object where there is none yet
-        org_area = np.sum(obj_mask > 0)
+        org_area = np.sum(obj_mask >= mask_thresh)
         obj_mask = cv2.bitwise_and(
             obj_mask, cv2.bitwise_not(image_mask[y_min:y_max, x_min:x_max])
-        )
+        )  # set mask to 0 where other objects have already been placed
 
         # if skip_if_overlap_func is set and evaluates to True the obj is not pasted
         visible_obj_area = np.sum(obj_mask > 0)
@@ -384,27 +388,24 @@ class CopyPasteGenerator(Dataset):
             return None
 
         # select background (unchanged area of the image)
-        mask_inv = cv2.bitwise_not(obj_mask)
-        bg = cv2.bitwise_and(
-            image[y_min:y_max, x_min:x_max],
-            image[y_min:y_max, x_min:x_max],
-            mask=mask_inv,
-        )
-
-        # select foreground (newly placed object)
-        fg = cv2.bitwise_and(obj, obj, mask=obj_mask)
+        bg = image[y_min:y_max, x_min:x_max]  # relevant rectangle of org image
 
         # place on obj and mask
-        image[y_min:y_max, x_min:x_max] = cv2.add(bg, fg)
+        alpha = np.stack([obj_mask / (2 ** 8 - 1)]*3, axis=2)
+        image[y_min:y_max, x_min:x_max] = (
+            obj * alpha + image[y_min:y_max, x_min:x_max] * (1-alpha)
+        ).astype(np.uint8)
+        obj_mask = cv2.threshold(obj_mask, mask_thresh, 255, cv2.THRESH_BINARY)[1]
         image_mask[y_min:y_max, x_min:x_max] = cv2.bitwise_or(
             image_mask[y_min:y_max, x_min:x_max], obj_mask
         )
 
         # scale to full image size
-        obj_mask_full_size = np.zeros(image.shape[:2])
+        obj_mask_full_size = np.zeros(image.shape[:2], dtype=np.uint8)
         obj_mask_full_size[y_min:y_max, x_min:x_max] = obj_mask
 
         coords = [x_min, y_min, w, h]
+
         return obj_mask_full_size, coords
 
 

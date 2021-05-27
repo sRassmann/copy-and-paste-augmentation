@@ -241,13 +241,6 @@ class CocoDataset:
     def get_categories(self):
         return self.categories.copy()
 
-    # TODO remove?
-    def set_categories(self, categories):
-        self.categories = categories
-        self.category_name_id_dict = {
-            entry["name"]: entry["id"] for entry in self.categories
-        }
-
     @staticmethod
     def create_coco_segmentation_single_instance(
         contours,
