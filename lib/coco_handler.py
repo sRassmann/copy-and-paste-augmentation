@@ -49,7 +49,7 @@ class CocoDataset:
             entry["name"]: entry["id"] for entry in self.categories
         }
         self.tmp_output_dir = os.path.join(
-            constants.path_to_output_dir, "tmp", "tmp_coco_anno.json"
+            constants.path_to_copy_and_paste, "tmp", "tmp_coco_anno.json"
         )
 
     def find_cat_name_of_id(self, cat_id) -> list:
@@ -97,7 +97,7 @@ class CocoDataset:
         else:
             cat_id = self.category_name_id_dict[category_name]
 
-        _, contours, hierarchy = cv2.findContours(
+        contours, hierarchy = cv2.findContours(
             mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
         )
         if len(contours) > 0:
@@ -183,7 +183,7 @@ class CocoDataset:
         for value in np.unique(mask):
             if value == 0:  # ignore background
                 continue
-            _, cont, hir = cv2.findContours(
+            cont, hir = cv2.findContours(
                 (mask == value).astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
             )
             ann = self.create_coco_segmentation_single_instance(
