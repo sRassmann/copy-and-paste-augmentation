@@ -1,0 +1,33 @@
+_BASE_: "Base-TensorMask.yaml"
+MODEL:  # use wheights from Tensormask paper
+  WEIGHTS: "data/pretrained_models/model_final_6x.pkl" 
+  TENSOR_MASK:
+    NUM_CLASSES: 7
+SOLVER:
+  IMS_PER_BATCH: 1
+  BASE_LR: 0.001
+  STEPS: (60000, 80000)
+  MAX_ITER: 15000
+CAP:
+  PATCH_POOL: "data/copy_and_paste/objs/"
+  MAX_RESOLUTION: (1700, 1400)  # Limit for Tesla P100 with 16 GB VRAM
+  POOLS_CFG: "configs/insects_cap_pool_config.yaml"
+  BACKGROUND_ANNO: "data/copy_and_paste/backgrounds/background_anno.json"
+  BACKGROUND_DIR: "data/copy_and_paste/backgrounds/"
+  COLLECTION_BOX_GENERATOR:
+    P: 0.6
+    POOL_NAME: "collection_box_pool"
+    MAX_N_OBJS_PER_IMAGE: 150
+    SKIP_IF_OVERLAP_RANGE: (0.1, 0.2)
+  RANDOM_GENERATOR:
+    P: 0.4
+    POOL_NAME: "random_pool"
+    MAX_N_OBJS_PER_IMAGE: 30
+    SKIP_IF_OVERLAP_RANGE: (0.1, 0.2)
+    ASSUMED_OBJ_SIZE: 70000
+  HIGH_QUALITY_GENERATOR:  # not yet implemented
+    P: 0.0
+    POOL_NAME: "hq_pool"
+    MAX_N_OBJS_PER_IMAGE: 150
+    SKIP_IF_OVERLAP_RANGE: (0.1, 0.1)
+VERSION: 2

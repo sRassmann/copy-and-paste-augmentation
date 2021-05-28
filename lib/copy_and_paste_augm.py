@@ -1,7 +1,7 @@
 """
 class offering simple copy and paste data augmentation
  (compare https://arxiv.org/abs/2012.07177).
-Optimized to integrate with detectron2 
+Optimized to integrate with detectron2
 """
 from abc import abstractmethod
 import warnings
@@ -15,17 +15,17 @@ import glob
 import cv2
 import albumentations as A
 from torch.utils.data import Dataset
+import matplotlib.pyplot as plt
 
 import lib.constants as constants
 
 
 class PatchCreator:
+    """
+    class handling cutting out objects as image patches from the image bases the
+     corresponding COCO instance annotation file
+    """
 
-    """class handling cutting out objects as image patches from the image bases the
-    corresponding COCO instance annotation file"""
-
-    # TODO refactor to opencv
-    # tolerance to compensate for rounding in the bounding box representation
     frame_tol = 5
 
     def __init__(
@@ -129,6 +129,7 @@ class CopyPasteGenerator(Dataset):
         scale_augment_dict=None,
         max_n_objs=150,
         augment=None,
+        skip_if_overlap_range=(0, 0),
     ):
         """
         Initialize abstract CopyPasteGenerator.
@@ -147,6 +148,8 @@ class CopyPasteGenerator(Dataset):
              definining the number of augmentations (value) at each scale level (key).
              See add_scale_versions for details
             augment: Albumentations data augmentation callable
+            skip_if_overlap_range: range of relative object occlusion in which the
+             propabilty of a placemente is lineary scaled.
         """
         self.max_n_objs = max_n_objs
         self.augment = self.AUGMENT if not augment else augment
@@ -157,6 +160,7 @@ class CopyPasteGenerator(Dataset):
         else:
             self.patches = self.init_default_patch_pool()
         self.backgrounds = background_pool
+        self.skip_if_overlap_func = OccludedAreaSkipFunc(*skip_if_overlap_range)
 
     def init_default_patch_pool(self) -> dict:
         return {
@@ -293,11 +297,27 @@ class CopyPasteGenerator(Dataset):
         img, instance_masks, bboxs, cats, _ = self.generate()
         return img, instance_masks, bboxs, cats
 
-    def __call__(self):
-        img, image_masks, bboxs, cats, _ = self.generate()
+    def __call__(self, seed=None) -> (np.ndarray, [np.ndarray], [int], [str]):
+        """
+        Generates an images from the patch and background pool according to the
+         logic in place_in_rect.
+
+        Args:
+            seed (int): Seed for generating Random number (np.random.seed()). If None
+             it is not changed.
+
+        Returns:
+            (img, instance_masks, bboxs, cats):
+                img (np.ndarray): generated image (bgr)
+                instance_masks (list(np.ndarray)): instance masks
+                bboxs (list([int, int, int, int])): bounding boxes of generated
+                image
+                cats (list(int)): category ids of the instances
+        """
+        img, image_masks, bboxs, cats, _ = self.generate(seed)
         return img, image_masks, bboxs, cats
 
-    def visualize_pool(self):
+    def visualize_pool(self) -> None:
         """
         shows examples for each pool
         """
@@ -681,7 +701,7 @@ class BackgroundPool:
         """
         self.res = max_resolution
         self.background_dir = background_dir
-        rects = json.load(open(os.path.join(self.background_dir, background_anno)))
+        rects = json.load(open(background_anno))
         self.grid_rects = {
             k: v
             for k, v in rects.items()
@@ -736,10 +756,41 @@ class BackgroundPool:
         return image, mask, rects
 
 
+class OccludedAreaSkipFunc:
+    """
+    Callable modelling a linearly increasing probabilty of object skipping with a
+     higher amount of object overlap.
+    """
+
+    def __init__(self, min_occ_area, max_occ_area):
+        """
+        If the relative occluded area is lower than min_are, the p(skip) = 0.
+        In [min_occ_area, max_occ_area] the probability increases linearly.
+        Above max_occ_area p(skip) = 1.
+        Args:
+            min_area: Min ocluded area relative to the overall area for an
+             overlap to be considered.
+            max_area: Max ocluded area relative to the overall area for an
+             overlap to be tolerated with a p > 0
+        Returns:
+            True if the patch is suppossed to be skipped
+        """
+        self.min = min_occ_area
+        self.max = max_occ_area
+
+    def __call__(self, obj_a, vis_a) -> bool:
+        if self.max <= self.min:
+            return False
+        rel_occ = (obj_a - vis_a) / obj_a
+        p = rel_occ - self.min
+        p /= self.max - self.min
+        return np.random.rand() < p
+
+
 class RandomGenerator(CopyPasteGenerator):
     """
     Places the images randomly with the only restrictions in the case the
-    skip_if_overlap function is specified.
+     skip_if_overlap function is specified.
     """
 
     # standard transformation for individual objs completely at random
@@ -750,14 +801,13 @@ class RandomGenerator(CopyPasteGenerator):
                 limit=360, border_mode=cv2.BORDER_CONSTANT, value=255, mask_value=0, p=1
             ),
             A.transforms.ColorJitter(
-                brightness=0.3,
+                brightness=0.4,
                 contrast=0.1,
-                saturation=0.1,
-                hue=0.03,
+                saturation=0.2,
+                hue=0.06,
                 always_apply=False,
-                p=0.5,
+                p=0.8,
             ),
-            A.transforms.FancyPCA(alpha=0.02, always_apply=False, p=0.5),
         ],
         p=0.85,
     )
@@ -768,6 +818,7 @@ class RandomGenerator(CopyPasteGenerator):
         background_pool,
         scale_augment_dict=None,
         max_n_objs=150,
+        skip_if_overlap_range=(0.2, 0.4),
         assumed_obj_size=300 * 300,
     ):
         """
@@ -781,11 +832,9 @@ class RandomGenerator(CopyPasteGenerator):
             background_pool,
             scale_augment_dict=scale_augment_dict,
             max_n_objs=max_n_objs,
+            skip_if_overlap_range=skip_if_overlap_range,
         )
         self.assumed_obj_size = assumed_obj_size
-        self.skip_if_overlap_func = (
-            lambda obj_a, vis_a: np.random.rand() < 4 * (obj_a - vis_a) / obj_a
-        )
 
     def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
         """
@@ -804,7 +853,7 @@ class RandomGenerator(CopyPasteGenerator):
             scale = np.random.choice(list(self.patches[cat]))
 
             obj, obj_mask, cat = self.patches[cat][scale][-1]
-            if rect_w - obj.shape[1] < 0 or rect_h - obj.shape[0] < 0:
+            if rect_w - obj.shape[1] <= 0 or rect_h - obj.shape[0] <= 0:
                 continue
             x = np.random.randint(rect_x, rect_x + rect_w - obj.shape[1])
             y = np.random.randint(rect_y, rect_y + rect_h - obj.shape[0])
@@ -823,24 +872,24 @@ class RandomGenerator(CopyPasteGenerator):
 class CollectionBoxGenerator(CopyPasteGenerator):
     """
     Chooses a single category at a single scale and places objs from this pool in a
-    grid layout within the frame.
+     grid layout within the frame.
     """
 
     # standard transformation for individual objs for box simulation
     AUGMENT = A.Compose(
         [
             A.Rotate(
-                limit=10, border_mode=cv2.BORDER_CONSTANT, value=255, mask_value=0, p=1
+                limit=15, border_mode=cv2.BORDER_CONSTANT, value=255, mask_value=0, p=1
             ),
             A.transforms.ColorJitter(
-                brightness=0.3,
+                brightness=0.4,
                 contrast=0.1,
-                saturation=0.1,
-                hue=0.03,
+                saturation=0.2,
+                hue=0.05,
                 always_apply=False,
-                p=0.5,
+                p=0.8,
             ),
-            A.transforms.FancyPCA(alpha=0.02, always_apply=False, p=0.5),
+            A.transforms.FancyPCA(alpha=0.04, always_apply=False, p=0.25),
         ],
         p=0.85,
     )
@@ -851,25 +900,33 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         background_pool,
         scale_augment_dict=None,
         max_n_objs=150,
-        grid_pos_jitter=0.2,
+        skip_if_overlap_range=(0.1, 0.4),
+        grid_pos_jitter=(0.1, 0.35),
         space_jitter=(0.6, 1.2),
     ):
         """
         Extends overwritten init methods with the following args
 
         Args:
-            grid_pos_jitter: heuristic parameter to specify jitter within the
+            grid_pos_jitter ((float, float)): heuristic parameter to specify jitter when
+             placing objects on the grid. The actual parameter is sampled from the given
+             interval for each generated image. Hence, the average amount of jitter
+             varies between generate images.
+            space_jitter ((float, float)): heuristic parameter to specify variation in
+             the assumed object size and, hence, the density of object placement.
+             Note, that this might interfere with the skip_if_overlap_func.
         """
         super().__init__(
             patch_pool,
             background_pool,
             scale_augment_dict=scale_augment_dict,
             max_n_objs=max_n_objs,
+            skip_if_overlap_range=skip_if_overlap_range,
         )
-        self.skip_if_overlap_func = (
-            lambda obj_a, vis_a: np.random.rand() < 6 * (obj_a - vis_a) / obj_a
-        )
+
+        assert grid_pos_jitter[1] >= grid_pos_jitter[0]
         self.grid_jitter = grid_pos_jitter
+        assert space_jitter[1] >= space_jitter[0]
         self.space_jitter = space_jitter
 
     def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
@@ -880,11 +937,11 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         cat = np.random.choice([cat for cat in self.patches if self.patches[cat]])
         scale = np.random.choice(list(self.patches[cat]))
         pool = self.patches[cat][scale]
+        grid_jitter = np.random.uniform(*self.grid_jitter)
 
         rect_x, rect_y, rect_w, rect_h = frame_rect
-        av_w, av_h = pool.get_mean_width(), pool.get_mean_height()
-        av_w *= np.random.uniform(self.space_jitter[0], self.space_jitter[1])
-        av_h *= np.random.uniform(self.space_jitter[0], self.space_jitter[1])
+        av_w = pool.get_mean_width() * np.random.uniform(*self.space_jitter)
+        av_h = pool.get_mean_height() * np.random.uniform(*self.space_jitter)
         grid_n_x = rect_w // int(av_w)
         grid_n_y = rect_h // int(av_h)
 
@@ -902,8 +959,8 @@ class CollectionBoxGenerator(CopyPasteGenerator):
             y = rect_y + i * av_h + av_h // 2
 
             # calculate left / lower limit and add some jitter
-            x -= np.random.normal(obj.shape[1] / 2, self.grid_jitter)
-            y -= np.random.normal(obj.shape[0] / 2, self.grid_jitter)
+            x -= np.random.normal(obj.shape[1] / 2, grid_jitter)
+            y -= np.random.normal(obj.shape[0] / 2, grid_jitter)
             x, y = int(x), int(y)
 
             # check if the instance is still in the frame
