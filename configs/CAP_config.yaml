@@ -1,13 +1,15 @@
 _BASE_: "Base-TensorMask.yaml"
 MODEL:  # use wheights from Tensormask paper
-  WEIGHTS: "data/pretrained_models/model_final_6x.pkl" 
+  WEIGHTS: "https://dl.fbaipublicfiles.com/detectron2/TensorMask/tensormask_R_50_FPN_6x/153538791/model_final_e8df31.pkl"
   TENSOR_MASK:
-    NUM_CLASSES: 7
+    NUM_CLASSES: 8  # Dataset uses 1-based indexing. 0 Cuold be used for noise
 SOLVER:
   IMS_PER_BATCH: 1
   BASE_LR: 0.001
   STEPS: (60000, 80000)
   MAX_ITER: 15000
+INPUT:
+  MAX_SIZE_TEST: 5000
 CAP:
   PICKLE_PATH: "./data/copy_and_paste/pickled_objs/cap_dataset.pkl"
   PATCH_POOL: "data/copy_and_paste/objs/"
