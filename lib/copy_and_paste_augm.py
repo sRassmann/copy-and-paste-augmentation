@@ -332,8 +332,8 @@ class CopyPasteGenerator(Dataset):
         """
         return sum(
             [
-                sum([len(pool) for pool in self.patches[cat].values])
-                for cat in self.patches.values()
+                sum([len(pool) for pool in self.patches[cat].values()])
+                for cat in self.patches.keys()
             ]
         )
 

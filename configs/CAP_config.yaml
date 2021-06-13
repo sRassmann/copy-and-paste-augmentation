@@ -9,8 +9,9 @@ SOLVER:
   STEPS: (60000, 80000)
   MAX_ITER: 15000
 CAP:
+  PICKLE_PATH: "./data/copy_and_paste/pickled_objs/cap_dataset.pkl"
   PATCH_POOL: "data/copy_and_paste/objs/"
-  MAX_RESOLUTION: (1700, 1400)  # Limit for Tesla P100 with 16 GB VRAM
+  MAX_RESOLUTION: (1600, 1300)  # Limit for Tesla P100 with 16 GB VRAM
   POOLS_CFG: "configs/insects_cap_pool_config.yaml"
   BACKGROUND_ANNO: "data/copy_and_paste/backgrounds/background_anno.json"
   BACKGROUND_DIR: "data/copy_and_paste/backgrounds/"
