@@ -91,6 +91,17 @@ def add_cap_config(cfg: CN):
     H.SKIP_IF_OVERLAP_RANGE = (0.0, 0.1)
     H.MAX_N_OBJS_PER_IMAGE = 150
 
+    c.AUGMENT = CN()
+    c.AUGMENT.BRIGHTNESS_SHIFT_LIMIT = 0.4
+    c.AUGMENT.CONTRAST_SHIFT_LIMIT = 0.10
+    c.AUGMENT.SATURATION_SHIFT_LIMIT = 0.08
+    c.AUGMENT.HUE_SHIFT_LIMIT = 0.03
+    c.AUGMENT.COLOR_JITTER_P = 0.0
+    c.AUGMENT.GAMMA_LIMIT = 30
+    c.AUGMENT.GAMMA_P = 0.5
+    c.AUGMENT.GAUSSIAN_NOISE_RANGE = (0, 100)
+    c.AUGMENT.GAUSSIAN_NOISE_P = 0.5
+
     c.PICKLE_PATH = None  # use serialized pickle obj if available
 
 
@@ -120,8 +131,9 @@ class CapDataset(Dataset):
         random_cap_cfg: CN,
         collection_box_cfg: CN,
         hq_cfg: CN,
-        seed=0,
-        length=15000,
+        augment_cfg: CN = None,
+        seed: int = 0,
+        length: int = 15000,
     ):
         self.parent_seed = seed
         np.random.seed(seed)
@@ -138,6 +150,33 @@ class CapDataset(Dataset):
         self.collection_box_p = collection_box_cfg.P
         self.random_p = random_cap_cfg.P
         self.hq_p = hq_cfg.P
+
+        self.final_augment = (  # no augmentations of masks possible
+            A.Compose(
+                [
+                    A.transforms.ColorJitter(
+                        brightness=augment_cfg.BRIGHTNESS_SHIFT_LIMIT,
+                        contrast=augment_cfg.CONTRAST_SHIFT_LIMIT,
+                        saturation=augment_cfg.SATURATION_SHIFT_LIMIT,
+                        hue=augment_cfg.HUE_SHIFT_LIMIT,
+                        always_apply=False,
+                        p=augment_cfg.COLOR_JITTER_P,
+                    ),
+                    A.transforms.RandomGamma(
+                        p=augment_cfg.AUGMENT.GAMMA_LIMIT,
+                        gamma_limit=augment_cfg.AUGMENT.GAMMA_LIMIT,
+                        eps=1e-05,
+                    ),
+                    A.transforms.GaussNoise(
+                        p=augment_cfg.AUGMENT.GAUSSIAN_NOISE_P,
+                        var_limit=augment_cfg.AUGMENT.GAUSSIAN_NOISE_RANGE,
+                    ),
+                ],
+                p=augment_cfg.P,
+            )
+            if augment_cfg and augment_cfg.P > 0
+            else A.Compose([A.NoOp()], p=0.0)
+        )
 
         if collection_box_cfg.P > 0:
             self.collection_box_cpg = CollectionBoxGenerator(
@@ -180,6 +219,7 @@ class CapDataset(Dataset):
             "random_cap_cfg": cfg.CAP.RANDOM_GENERATOR,
             "collection_box_cfg": cfg.CAP.COLLECTION_BOX_GENERATOR,
             "hq_cfg": cfg.CAP.HIGH_QUALITY_GENERATOR,
+            "augment_cfg": cfg.CAP.AUGMENT,
             "length": cfg.SOLVER.MAX_ITER,
         }
 
@@ -320,6 +360,7 @@ class CapDataset(Dataset):
         image, image_masks, bboxs, cats = gen()
 
         dataset_dict = {}
+        image = self.final_augment(image=image)["image"]
         dataset_dict["image"] = torch.as_tensor(
             image.transpose(2, 0, 1).astype("float32")
         )
@@ -327,7 +368,7 @@ class CapDataset(Dataset):
             {
                 "segmentation": mask.astype(bool),
                 "category_id": cat,
-                "bbox": bbox,  # not used but still nice to have
+                "bbox": bbox,
                 "bbox_mode": BoxMode.XYWH_ABS,
             }
             for mask, bbox, cat in zip(image_masks, bboxs, cats)
