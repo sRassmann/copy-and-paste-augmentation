@@ -794,7 +794,6 @@ class RandomGenerator(CopyPasteGenerator):
     """
 
     # standard transformation for individual objs completely at random
-    # TODO add rescale parameter here, if the image is rotated quality is lost anyways
     AUGMENT = A.Compose(
         [
             A.Rotate(
@@ -820,6 +819,7 @@ class RandomGenerator(CopyPasteGenerator):
         max_n_objs=150,
         skip_if_overlap_range=(0.2, 0.4),
         assumed_obj_size=300 * 300,
+        augment=augment,
     ):
         """
         Extends overwritten init methods with the following args
@@ -903,6 +903,7 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         skip_if_overlap_range=(0.1, 0.4),
         grid_pos_jitter=(0.1, 0.35),
         space_jitter=(0.6, 1.2),
+        augment=None,
     ):
         """
         Extends overwritten init methods with the following args
@@ -922,8 +923,8 @@ class CollectionBoxGenerator(CopyPasteGenerator):
             scale_augment_dict=scale_augment_dict,
             max_n_objs=max_n_objs,
             skip_if_overlap_range=skip_if_overlap_range,
+            augment=augment,
         )
-
         assert grid_pos_jitter[1] >= grid_pos_jitter[0]
         self.grid_jitter = grid_pos_jitter
         assert space_jitter[1] >= space_jitter[0]

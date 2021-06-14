@@ -9,6 +9,7 @@ from detectron2.data import detection_utils
 from detectron2.config import CfgNode as CN
 from detectron2.structures.boxes import BoxMode
 from detectron2.evaluation import COCOEvaluator
+import logging
 
 from torch.utils.data import Dataset
 from lib import copy_and_paste_augm, constants
@@ -17,6 +18,7 @@ import torch
 import numpy as np
 import yaml
 import pickle
+import time
 
 from lib.copy_and_paste_augm import *
 
@@ -42,6 +44,21 @@ def add_cap_config(cfg: CN):
     R.SKIP_IF_OVERLAP_RANGE = (0.2, 0.4)
     R.MAX_N_OBJS_PER_IMAGE = 150
     R.ASSUMED_OBJ_SIZE = 40000
+    R.AUGMENT = CN()
+    N = R.AUGMENT
+    N.P = 0.1
+    N.SCALE_RANGE = (0, 0)
+    N.ROTATE_RANGE = (-180, 180)
+    N.ROTATE_SCALE_P = 0.85
+    N.DISTORT_LIMIT = 0
+    N.DISTORT_P = 0.0
+    N.BRIGHTNESS_SHIFT_LIMIT = 0.4
+    N.CONTRAST_SHIFT_LIMIT = 0.1
+    N.SATURATION_SHIFT_LIMIT = 0.2
+    N.HUE_SHIFT_LIMIT = 0.06
+    N.COLOR_JITTER_P = 0.8
+    N.PCA_ALPHA = 0
+    N.PCA_P = 0.0
 
     c.COLLECTION_BOX_GENERATOR = CN()
     B = c.COLLECTION_BOX_GENERATOR
@@ -51,6 +68,21 @@ def add_cap_config(cfg: CN):
     B.MAX_N_OBJS_PER_IMAGE = 150
     B.GRID_JITTER = (0.1, 0.35)
     B.SPACE_JITTER = (0.6, 1.3)
+    B.AUGMENT = CN()
+    N = B.AUGMENT
+    N.P = 0.1
+    N.SCALE_RANGE = (0, 0)
+    N.ROTATE_RANGE = (-15, 15)
+    N.ROTATE_SCALE_P = 1.0
+    N.DISTORT_LIMIT = 0
+    N.DISTORT_P = 0.0
+    N.BRIGHTNESS_SHIFT_LIMIT = 0.4
+    N.CONTRAST_SHIFT_LIMIT = 0.1
+    N.SATURATION_SHIFT_LIMIT = 0.2
+    N.HUE_SHIFT_LIMIT = 0.05
+    N.COLOR_JITTER_P = 0.8
+    N.PCA_ALPHA = 0.04
+    N.PCA_P = 0.25
 
     c.HIGH_QUALITY_GENERATOR = CN()
     H = c.HIGH_QUALITY_GENERATOR
@@ -118,6 +150,7 @@ class CapDataset(Dataset):
                 skip_if_overlap_range=collection_box_cfg.SKIP_IF_OVERLAP_RANGE,
                 grid_pos_jitter=collection_box_cfg.GRID_JITTER,
                 space_jitter=collection_box_cfg.SPACE_JITTER,
+                augment=self.create_augmentations(collection_box_cfg),
             )
 
         if random_cap_cfg.P > 0:
@@ -130,6 +163,7 @@ class CapDataset(Dataset):
                 max_n_objs=random_cap_cfg.MAX_N_OBJS_PER_IMAGE,
                 skip_if_overlap_range=random_cap_cfg.SKIP_IF_OVERLAP_RANGE,
                 assumed_obj_size=random_cap_cfg.ASSUMED_OBJ_SIZE,
+                augment=self.create_augmentations(random_cap_cfg),
             )
 
         if hq_cfg.P > 0:
@@ -150,13 +184,13 @@ class CapDataset(Dataset):
         }
 
     @staticmethod
-    def get_pool_cfg(cfg_path, pool_key):
+    def get_pool_cfg(cfg_path, pool_key) -> dict:
         with open(cfg_path, "r") as y:
             d = yaml.load(y, Loader=yaml.FullLoader)
         return d[pool_key]
 
     @staticmethod
-    def init_base_patch_pool(obj_dir):
+    def init_base_patch_pool(obj_dir) -> None:
         """
         initializes pool of raw object patches reused in for all created generators
         """
@@ -178,27 +212,83 @@ class CapDataset(Dataset):
         }
 
     @staticmethod
+    def create_augmentations(generator_node: CN) -> A.Compose or None:
+        """
+        Create Albumentations augmentation from Generator cfg node if it has a AUGMENT
+         attribute.
+
+        Args:
+            generator_node: Config Node of Generator
+
+        Returns:
+            Composed augmentations or None if no augment node exists
+        """
+        if not hasattr(generator_node, "AUGMENT"):
+            return
+        N = generator_node.AUGMENT
+        return A.Compose(
+            [
+                A.ShiftScaleRotate(
+                    always_apply=False,
+                    p=N.ROTATE_SCALE_P,
+                    shift_limit=(0.0, 0.0),
+                    scale_limit=N.SCALE_RANGE,
+                    rotate_limit=N.ROTATE_RANGE,
+                    interpolation=cv2.INTER_CUBIC,
+                    border_mode=0,
+                    value=(0, 0, 0),
+                    mask_value=0,
+                ),
+                A.augmentations.transforms.OpticalDistortion(
+                    distort_limit=N.DISTORT_LIMIT,
+                    interpolation=cv2.INTER_LINEAR,
+                    border_mode=cv2.BORDER_CONSTANT,
+                    p=N.DISTORT_P,
+                ),
+                A.transforms.ColorJitter(
+                    brightness=N.BRIGHTNESS_SHIFT_LIMIT,
+                    contrast=N.CONTRAST_SHIFT_LIMIT,
+                    saturation=N.SATURATION_SHIFT_LIMIT,
+                    hue=N.HUE_SHIFT_LIMIT,
+                    always_apply=False,
+                    p=N.COLOR_JITTER_P,
+                ),
+                A.transforms.FancyPCA(alpha=N.PCA_ALPHA, always_apply=False, p=N.PCA_P),
+            ],
+            p=N.P,
+        )
+
+    @staticmethod
     def try_restore_from_pickle(cfg):
         """
         load existing serialized obj from the path
         """
-        # TODO print to logger
         if cfg.CAP.PICKLE_PATH and os.path.exists(cfg.CAP.PICKLE_PATH):
             self = pickle.load(open(cfg.CAP.PICKLE_PATH, "rb"))
+            logger = logging.getLogger(__name__)
+            logger.critical(
+                f"load pickled CAP Dataset (last modified on "
+                + time.strftime(
+                    "%Y%m%d-%H%M%S",
+                    time.localtime(os.path.getmtime(cfg.CAP.PICKLE_PATH)),
+                )
+                + ")"
+            )
+
             # TODO assert equality of params
             return self
         else:
             CapDataset(cfg)
 
-    def dump(self, cfg, path=None):
+    def dump(self, cfg: CN, path=None) -> None:
         """
-        dump created pool as pickle obj and save path to cfg
+        dump created pool as pickle obj and save path to cfg.
 
         Args:
-            cfg:  config
-            path: path to save the pickle obj. If None, the path from the cfg is used.
-             Note, that the pickle objs can become large, so using a tmp dir might be
-             better.
+            cfg: config
+            path: path to alternative location to dump the obj. If specified the obj is
+             dumped to this location (e.g. temporary dir) and the path in the cfg is
+             updated.
         """
         path = path if path else cfg.CAP.PICKLE_PATH
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -206,13 +296,16 @@ class CapDataset(Dataset):
             pickle.dump(self, f)
         cfg.CAP.PICKLE_PATH = path
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> dict:
         """
         returns an object from one of the configured CAP Generators.
 
         The passed idx is used as seed for reproducibility and added to the defined seed
          in the constructor. Hence, starting from the defined seed a deterministic
          sequence of generated images is generated and returned.
+
+        Returns:
+            A default detectron2 compatible dataset dictionary
         """
         np.random.seed(self.parent_seed + idx)
 
