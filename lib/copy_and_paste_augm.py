@@ -819,7 +819,7 @@ class RandomGenerator(CopyPasteGenerator):
         max_n_objs=150,
         skip_if_overlap_range=(0.2, 0.4),
         assumed_obj_size=300 * 300,
-        augment=augment,
+        augment=AUGMENT,
     ):
         """
         Extends overwritten init methods with the following args
@@ -903,7 +903,7 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         skip_if_overlap_range=(0.1, 0.4),
         grid_pos_jitter=(0.1, 0.35),
         space_jitter=(0.6, 1.2),
-        augment=None,
+        augment=AUGMENT,
     ):
         """
         Extends overwritten init methods with the following args

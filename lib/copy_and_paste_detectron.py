@@ -9,7 +9,11 @@ from detectron2.data import detection_utils
 from detectron2.config import CfgNode as CN
 from detectron2.structures.boxes import BoxMode
 from detectron2.evaluation import COCOEvaluator
-import logging
+from detectron2.engine.hooks import HookBase
+from detectron2.utils.logger import log_every_n_seconds
+from detectron2.data import DatasetMapper, build_detection_test_loader
+from detectron2.utils import comm
+from detectron2.data.transforms import ResizeShortestEdge
 
 from torch.utils.data import Dataset
 from lib import copy_and_paste_augm, constants
@@ -19,6 +23,8 @@ import numpy as np
 import yaml
 import pickle
 import time
+import datetime
+import logging
 
 from lib.copy_and_paste_augm import *
 
@@ -92,12 +98,13 @@ def add_cap_config(cfg: CN):
     H.MAX_N_OBJS_PER_IMAGE = 150
 
     c.AUGMENT = CN()
-    c.AUGMENT.BRIGHTNESS_SHIFT_LIMIT = 0.4
-    c.AUGMENT.CONTRAST_SHIFT_LIMIT = 0.10
-    c.AUGMENT.SATURATION_SHIFT_LIMIT = 0.08
-    c.AUGMENT.HUE_SHIFT_LIMIT = 0.03
+    c.AUGMENT.P = 0.0
+    c.AUGMENT.BRIGHTNESS_SHIFT_LIMIT = 0.2
+    c.AUGMENT.CONTRAST_SHIFT_LIMIT = 0.07
+    c.AUGMENT.SATURATION_SHIFT_LIMIT = 0.07
+    c.AUGMENT.HUE_SHIFT_LIMIT = 0.02
     c.AUGMENT.COLOR_JITTER_P = 0.0
-    c.AUGMENT.GAMMA_LIMIT = 30
+    c.AUGMENT.GAMMA_LIMIT = 10
     c.AUGMENT.GAMMA_P = 0.5
     c.AUGMENT.GAUSSIAN_NOISE_RANGE = (0, 100)
     c.AUGMENT.GAUSSIAN_NOISE_P = 0.5
@@ -140,17 +147,6 @@ class CapDataset(Dataset):
         self.length = length
         self.patch_pool = self.init_base_patch_pool(patch_pool)
 
-        self.background_pool = BackgroundPool(
-            background_dir=background_dir,
-            background_anno=background_anno,
-            max_resolution=max_resolution,
-        )
-
-        assert random_cap_cfg.P + collection_box_cfg.P + hq_cfg.P == 1
-        self.collection_box_p = collection_box_cfg.P
-        self.random_p = random_cap_cfg.P
-        self.hq_p = hq_cfg.P
-
         self.final_augment = (  # no augmentations of masks possible
             A.Compose(
                 [
@@ -162,14 +158,9 @@ class CapDataset(Dataset):
                         always_apply=False,
                         p=augment_cfg.COLOR_JITTER_P,
                     ),
-                    A.transforms.RandomGamma(
-                        p=augment_cfg.AUGMENT.GAMMA_LIMIT,
-                        gamma_limit=augment_cfg.AUGMENT.GAMMA_LIMIT,
-                        eps=1e-05,
-                    ),
                     A.transforms.GaussNoise(
-                        p=augment_cfg.AUGMENT.GAUSSIAN_NOISE_P,
-                        var_limit=augment_cfg.AUGMENT.GAUSSIAN_NOISE_RANGE,
+                        p=augment_cfg.GAUSSIAN_NOISE_P,
+                        var_limit=augment_cfg.GAUSSIAN_NOISE_RANGE,
                     ),
                 ],
                 p=augment_cfg.P,
@@ -177,6 +168,17 @@ class CapDataset(Dataset):
             if augment_cfg and augment_cfg.P > 0
             else A.Compose([A.NoOp()], p=0.0)
         )
+
+        self.background_pool = BackgroundPool(
+            background_dir=background_dir,
+            background_anno=background_anno,
+            max_resolution=max_resolution,
+        )
+
+        assert random_cap_cfg.P + collection_box_cfg.P + hq_cfg.P == 1
+        self.collection_box_p = collection_box_cfg.P
+        self.random_p = random_cap_cfg.P
+        self.hq_p = hq_cfg.P
 
         if collection_box_cfg.P > 0:
             self.collection_box_cpg = CollectionBoxGenerator(
@@ -234,7 +236,6 @@ class CapDataset(Dataset):
         """
         initializes pool of raw object patches reused in for all created generators
         """
-        # TODO annotate as yaml, include splitting instances for training and testing
         dirs = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
         cat_ids = [s.split("-")[0] for s in dirs]
         cat_labels = [s.split("-")[1] for s in dirs]
@@ -264,7 +265,7 @@ class CapDataset(Dataset):
             Composed augmentations or None if no augment node exists
         """
         if not hasattr(generator_node, "AUGMENT"):
-            return
+            return None
         N = generator_node.AUGMENT
         return A.Compose(
             [
@@ -309,7 +310,7 @@ class CapDataset(Dataset):
             logger.critical(
                 f"load pickled CAP Dataset (last modified on "
                 + time.strftime(
-                    "%Y%m%d-%H%M%S",
+                    "%Y/%m/%d-%H:%M:%S",
                     time.localtime(os.path.getmtime(cfg.CAP.PICKLE_PATH)),
                 )
                 + ")"
@@ -318,17 +319,17 @@ class CapDataset(Dataset):
             # TODO assert equality of params
             return self
         else:
-            CapDataset(cfg)
+            return CapDataset(cfg)
 
-    def dump(self, cfg: CN, path=None) -> None:
+    def dump(self, cfg, path=None):
         """
-        dump created pool as pickle obj and save path to cfg.
+        dump created pool as pickle obj and save path to cfg
 
         Args:
-            cfg: config
-            path: path to alternative location to dump the obj. If specified the obj is
-             dumped to this location (e.g. temporary dir) and the path in the cfg is
-             updated.
+            cfg:  config
+            path: path to save the pickle obj. If None, the path from the cfg is used.
+             Note, that the pickle objs can become large, so using a tmp dir might be
+             better.
         """
         path = path if path else cfg.CAP.PICKLE_PATH
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -336,16 +337,13 @@ class CapDataset(Dataset):
             pickle.dump(self, f)
         cfg.CAP.PICKLE_PATH = path
 
-    def __getitem__(self, idx) -> dict:
+    def __getitem__(self, idx):
         """
         returns an object from one of the configured CAP Generators.
 
         The passed idx is used as seed for reproducibility and added to the defined seed
          in the constructor. Hence, starting from the defined seed a deterministic
          sequence of generated images is generated and returned.
-
-        Returns:
-            A default detectron2 compatible dataset dictionary
         """
         np.random.seed(self.parent_seed + idx)
 
@@ -432,3 +430,97 @@ class Trainer(DefaultTrainer):
             dataset, total_batch_size=1, mapper=None
         )
         return train_loader
+
+    def build_hooks(self):
+        hooks = super().build_hooks()
+        hooks.insert(
+            -1,
+            LossEvalHook(
+                self.cfg.TEST.EVAL_PERIOD,
+                self.model,
+                build_detection_test_loader(
+                    self.cfg,
+                    self.cfg.DATASETS.TEST[0],
+                    DatasetMapper(
+                        self.cfg,
+                        True,
+                        augmentations=[
+                            ResizeShortestEdge(
+                                self.cfg.INPUT.MIN_SIZE_TEST,
+                                self.cfg.INPUT.MAX_SIZE_TEST,
+                            )
+                        ],
+                    ),
+                ),
+            ),
+        )
+        logger = logging.getLogger(__name__)
+        logger.critical("actually, this DatasetMapper is used for testing")
+        return hooks
+
+
+class LossEvalHook(HookBase):
+    """
+    track validation loss, taken from
+     https://gist.github.com/ortegatron/c0dad15e49c2b74de8bb09a5615d9f6b
+    """
+
+    def __init__(self, eval_period, model, data_loader):
+        self._model = model
+        self._period = eval_period
+        self._data_loader = data_loader
+
+    def _do_loss_eval(self):
+        # Copying inference_on_dataset from evaluator.py
+        total = len(self._data_loader)
+        num_warmup = min(5, total - 1)
+        start_time = time.perf_counter()
+        total_compute_time = 0
+        losses = []
+        for idx, inputs in enumerate(self._data_loader):
+            if idx == num_warmup:
+                start_time = time.perf_counter()
+                total_compute_time = 0
+            start_compute_time = time.perf_counter()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            total_compute_time += time.perf_counter() - start_compute_time
+            iters_after_start = idx + 1 - num_warmup * int(idx >= num_warmup)
+            seconds_per_img = total_compute_time / iters_after_start
+            if idx >= num_warmup * 2 or seconds_per_img > 5:
+                total_seconds_per_img = (
+                    time.perf_counter() - start_time
+                ) / iters_after_start
+                eta = datetime.timedelta(
+                    seconds=int(total_seconds_per_img * (total - idx - 1))
+                )
+                log_every_n_seconds(
+                    logging.INFO,
+                    "Loss on Validation  done {}/{}. {:.4f} s / img. ETA={}".format(
+                        idx + 1, total, seconds_per_img, str(eta)
+                    ),
+                    n=5,
+                )
+            loss_batch = self._get_loss(inputs)
+            losses.append(loss_batch)
+        mean_loss = np.mean(losses)
+        self.trainer.storage.put_scalar("validation_loss", mean_loss)
+        comm.synchronize()
+        return losses
+
+    def _get_loss(self, data):
+        # How loss is calculated on train_loop
+        metrics_dict = self._model(data)
+        metrics_dict = {
+            k: v.detach().cpu().item() if isinstance(v, torch.Tensor) else float(v)
+            for k, v in metrics_dict.items()
+        }
+        total_losses_reduced = sum(loss for loss in metrics_dict.values())
+        return total_losses_reduced
+
+    def after_step(self):
+        next_iter = self.trainer.iter + 1
+        is_final = next_iter == self.trainer.max_iter
+        if is_final or (self._period > 0 and next_iter % self._period == 0):
+            self._do_loss_eval()
+        self.trainer.storage.put_scalars(timetest=12)
