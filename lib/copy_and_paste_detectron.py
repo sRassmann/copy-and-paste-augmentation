@@ -14,6 +14,7 @@ from detectron2.utils.logger import log_every_n_seconds
 from detectron2.data import DatasetMapper, build_detection_test_loader
 from detectron2.utils import comm
 from detectron2.data.transforms import ResizeShortestEdge
+from detectron2.utils.visualizer import Visualizer
 
 from torch.utils.data import Dataset
 from lib import copy_and_paste_augm, constants
@@ -392,6 +393,27 @@ class CapDataset(Dataset):
         if self.hq_p > 0:
             print("Pool for High Quality Images")
             self.hq_cpg.visualize_pool()
+
+    @staticmethod
+    def visualize_loader(data_loader, cfg, n_examples=5):
+        """
+        show images from train or test loader with COCO annotations based on
+         https://github.com/facebookresearch/detectron2/blob/master/tools/visualize_data.py
+        """
+        for batch in data_loader:
+            for per_image in batch:
+                if n_examples == 0:
+                    return
+                img = per_image["image"].permute(1, 2, 0).cpu().detach().numpy()
+                img = detection_utils.convert_image_to_rgb(img, cfg.INPUT.FORMAT)
+                visualizer = Visualizer(img, scale=1)
+                target_fields = per_image["instances"].get_fields()
+                vis = visualizer.overlay_instances(
+                    boxes=target_fields.get("gt_boxes", None),
+                    masks=target_fields.get("gt_masks", None),
+                )
+                cv2_imshow(vis.get_image()[:, :, ::-1])
+                n_examples -= 1
 
     @staticmethod
     def get_projected_mask(dataset_dict):
