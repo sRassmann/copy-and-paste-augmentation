@@ -14,8 +14,21 @@ MODEL:
   TENSOR_MASK:
     ALIGNED_ON: True
     BIPYRAMID_ON: True
+    NUM_CLASSES: 8  # Dataset uses 1-based indexing. 0 Could be used for noise
+    SCORE_THRESH_TEST: 0.5
+  WEIGHTS: "https://dl.fbaipublicfiles.com/detectron2/TensorMask/tensormask_R_50_FPN_6x/153538791/model_final_e8df31.pkl"
+SOLVER:
+  IMS_PER_BATCH: 1
+  BASE_LR: 0.001
+  MAX_ITER: 20000
+INPUT:  # Limits for Tesla P100 with 16 GB VRAM
+  MAX_SIZE_TEST: 1600
+  MIN_SIZE_TEST: 1300
+  MAX_SIZE_TRAIN: 1600
+  MIN_SIZE_TRAIN: (1300,)
+DATALOADER:
+  NUM_WORKERS: 1
 TEST:
-  DETECTIONS_PER_IMAGE: 1000
-INPUT:
-  MAX_SIZE_TEST: 1800
+  DETECTIONS_PER_IMAGE: 300
+  EVAL_PERIOD: 500
 VERSION: 2

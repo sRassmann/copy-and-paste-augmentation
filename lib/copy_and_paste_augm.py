@@ -3,19 +3,19 @@ class offering simple copy and paste data augmentation
  (compare https://arxiv.org/abs/2012.07177).
 Optimized to integrate with detectron2
 """
-from abc import abstractmethod
-import warnings
-import itertools
-
-import os
-import numpy as np
-from tqdm import tqdm
-import json
 import glob
-import cv2
+import itertools
+import json
+import os
+import warnings
+from abc import abstractmethod
+
 import albumentations as A
-from torch.utils.data import Dataset
+import cv2
 import matplotlib.pyplot as plt
+import numpy as np
+from torch.utils.data import Dataset
+from tqdm import tqdm
 
 import lib.constants as constants
 
