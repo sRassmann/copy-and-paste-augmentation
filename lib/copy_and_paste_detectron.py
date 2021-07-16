@@ -1,16 +1,31 @@
 """
 module to handle detectron2 integration of CAP (requires detectron2 installation)
 """
-import pickle
-
-import yaml
-from detectron2.config import CfgNode as CN
-from detectron2.config import configurable
-from detectron2.data import detection_utils
-from detectron2.data.build import build_detection_train_loader
-from detectron2.structures.boxes import BoxMode
-from detectron2.utils.visualizer import Visualizer
 from google.colab.patches import cv2_imshow
+from detectron2.config import configurable
+from detectron2.engine.defaults import DefaultTrainer
+from detectron2.data.build import build_detection_train_loader
+from detectron2.data import detection_utils
+from detectron2.config import CfgNode as CN
+from detectron2.structures.boxes import BoxMode
+from detectron2.evaluation import COCOEvaluator
+from detectron2.engine.hooks import HookBase
+from detectron2.utils.logger import log_every_n_seconds
+from detectron2.data import DatasetMapper, build_detection_test_loader
+from detectron2.utils import comm
+from detectron2.data.transforms import ResizeShortestEdge
+from detectron2.utils.visualizer import Visualizer
+
+from torch.utils.data import Dataset
+from lib import copy_and_paste_augm, constants
+import os
+import torch
+import numpy as np
+import yaml
+import pickle
+import time
+import datetime
+import logging
 
 from lib.copy_and_paste_augm import *
 from lib.detectron2_utils import *
@@ -97,15 +112,6 @@ def add_cap_config(cfg: CN):
     c.AUGMENT.GAUSSIAN_NOISE_P = 0.5
 
     c.PICKLE_PATH = None  # use serialized pickle obj if available
-
-
-def create_output(cfg):
-    """
-    creates detectron compatible output dir from cfg
-    """
-    dirname = cfg.OUTPUT_DIR
-    os.makedirs(dirname, exist_ok=True)
-    open(os.path.join(dirname, "metrics.json"), "a").close()
 
 
 class CapDataset(Dataset):
@@ -349,6 +355,7 @@ class CapDataset(Dataset):
         dataset_dict["image"] = torch.as_tensor(
             image.transpose(2, 0, 1).astype("float32")
         )
+        cats = [int(cat) - 1 for cat in cats]
         anns = [
             {
                 "segmentation": mask.astype(bool),
@@ -381,27 +388,6 @@ class CapDataset(Dataset):
             self.hq_cpg.visualize_pool()
 
     @staticmethod
-    def visualize_loader(data_loader, cfg, n_examples=5):
-        """
-        show images from train or test loader with COCO annotations based on
-         https://github.com/facebookresearch/detectron2/blob/master/tools/visualize_data.py
-        """
-        for batch in data_loader:
-            for per_image in batch:
-                if n_examples == 0:
-                    return
-                img = per_image["image"].permute(1, 2, 0).cpu().detach().numpy()
-                img = detection_utils.convert_image_to_rgb(img, cfg.INPUT.FORMAT)
-                visualizer = Visualizer(img, scale=1)
-                target_fields = per_image["instances"].get_fields()
-                vis = visualizer.overlay_instances(
-                    boxes=target_fields.get("gt_boxes", None),
-                    masks=target_fields.get("gt_masks", None),
-                )
-                cv2_imshow(vis.get_image()[:, :, ::-1])
-                n_examples -= 1
-
-    @staticmethod
     def get_projected_mask(dataset_dict):
         """
         utility function to project the created list of mask into a single mask
@@ -432,3 +418,59 @@ class CapTrainer(BaseTrainer):
             dataset, total_batch_size=1, mapper=None
         )
         return train_loader
+
+
+class CapTrainerTrainLoss(CapTrainer):
+    """
+    Trainer also tracking the loss of the original train images in order to asses
+     overfitting in the CAP setting.
+    """
+
+    def build_hooks(self):
+        hooks = super().build_hooks()
+        hooks.insert(
+            -1,
+            LossEvalHook(
+                self.cfg.TEST.EVAL_PERIOD,
+                self.model,
+                build_detection_test_loader(
+                    self.cfg,
+                    self.cfg.DATASETS.TEST[0],
+                    DatasetMapper(
+                        self.cfg,
+                        True,
+                        augmentations=[
+                            ResizeShortestEdge(
+                                self.cfg.INPUT.MIN_SIZE_TEST,
+                                self.cfg.INPUT.MAX_SIZE_TEST,
+                            )
+                        ],
+                    ),
+                ),
+            ),
+        )
+        hooks.insert(
+            -1,
+            LossEvalHook(
+                self.cfg.TEST.EVAL_PERIOD,
+                self.model,
+                build_detection_test_loader(
+                    self.cfg,
+                    self.cfg.DATASETS.TEST[1],  # Test set is used to also get AP scores
+                    DatasetMapper(
+                        self.cfg,
+                        True,
+                        augmentations=[
+                            ResizeShortestEdge(
+                                self.cfg.INPUT.MIN_SIZE_TEST,
+                                self.cfg.INPUT.MAX_SIZE_TEST,
+                            )
+                        ],
+                    ),
+                ),
+                "train_loss",
+            ),
+        )
+        logger = logging.getLogger(__name__)
+        logger.critical("actually, this DatasetMapper is used for testing")
+        return hooks

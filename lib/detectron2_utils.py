@@ -1,20 +1,28 @@
+from google.colab.patches import cv2_imshow
+from detectron2.config import configurable
+from detectron2.engine.defaults import DefaultTrainer
+from detectron2.data.build import build_detection_train_loader
+from detectron2.data import detection_utils
+from detectron2.config import CfgNode as CN
+from detectron2.structures.boxes import BoxMode
+from detectron2.evaluation import COCOEvaluator
+from detectron2.engine.hooks import HookBase
+from detectron2.utils.logger import log_every_n_seconds
+from detectron2.data import DatasetMapper, build_detection_test_loader
+from detectron2.utils import comm
+from detectron2.data.transforms import ResizeShortestEdge
+from detectron2.utils.visualizer import Visualizer
+
+from torch.utils.data import Dataset
+from lib import copy_and_paste_augm, constants
+import os
+import torch
+import numpy as np
+import yaml
+import pickle
+import time
 import datetime
 import logging
-import os
-import time
-
-import numpy as np
-import torch
-from detectron2.data import DatasetMapper, build_detection_test_loader
-from detectron2.data import detection_utils
-from detectron2.data.transforms import ResizeShortestEdge
-from detectron2.engine.defaults import DefaultTrainer
-from detectron2.engine.hooks import HookBase
-from detectron2.evaluation import COCOEvaluator
-from detectron2.utils import comm
-from detectron2.utils.logger import log_every_n_seconds
-from detectron2.utils.visualizer import Visualizer
-from google.colab.patches import cv2_imshow
 
 
 def visualize_detectron2_loader(data_loader, cfg, n_examples=5):
@@ -92,10 +100,11 @@ class LossEvalHook(HookBase):
      https://gist.github.com/ortegatron/c0dad15e49c2b74de8bb09a5615d9f6b
     """
 
-    def __init__(self, eval_period, model, data_loader):
+    def __init__(self, eval_period, model, data_loader, name="validation_loss"):
         self._model = model
         self._period = eval_period
         self._data_loader = data_loader
+        self._name = name
 
     def _do_loss_eval(self):
         # Copying inference_on_dataset from evaluator.py
@@ -123,15 +132,13 @@ class LossEvalHook(HookBase):
                 )
                 log_every_n_seconds(
                     logging.INFO,
-                    "Loss on Validation  done {}/{}. {:.4f} s / img. ETA={}".format(
-                        idx + 1, total, seconds_per_img, str(eta)
-                    ),
+                    f"Loss on {self._name} done {idx + 1}/{total}. {seconds_per_img:.3f} s / img. ETA={str(eta)}",
                     n=5,
                 )
             loss_batch = self._get_loss(inputs)
             losses.append(loss_batch)
         mean_loss = np.mean(losses)
-        self.trainer.storage.put_scalar("validation_loss", mean_loss)
+        self.trainer.storage.put_scalar(self._name, mean_loss)
         # TODO track different scales
         comm.synchronize()
         return losses

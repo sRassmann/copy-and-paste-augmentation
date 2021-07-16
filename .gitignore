@@ -43,6 +43,7 @@ geckodriver.log
 
 # CUSTOM
 .virtual_documents/ 
+*.html
 
 ## raw data
 data/
