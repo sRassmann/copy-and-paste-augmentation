@@ -23,9 +23,11 @@ import pickle
 import time
 import datetime
 import logging
+import glob
+import cv2
 
 
-def visualize_detectron2_loader(data_loader, cfg, n_examples=5):
+def visualize_detectron2_loader(data_loader, cfg, n_examples=5, scale=1):
     """
     show images from train or test loader with COCO annotations based on
      https://github.com/facebookresearch/detectron2/blob/master/tools/visualize_data.py
@@ -36,13 +38,18 @@ def visualize_detectron2_loader(data_loader, cfg, n_examples=5):
                 return
             img = per_image["image"].permute(1, 2, 0).cpu().detach().numpy()
             img = detection_utils.convert_image_to_rgb(img, cfg.INPUT.FORMAT)
-            visualizer = Visualizer(img, scale=1)
+            visualizer = Visualizer(img, scale=scale)
             target_fields = per_image["instances"].get_fields()
             vis = visualizer.overlay_instances(
                 boxes=target_fields.get("gt_boxes", None),
                 masks=target_fields.get("gt_masks", None),
             )
             cv2_imshow(vis.get_image()[:, :, ::-1])
+            cv2_imshow(
+                cv2.resize(
+                    img, (round(img.shape[1] * scale), round(img.shape[0] * scale))
+                )
+            )
             n_examples -= 1
 
 
@@ -53,6 +60,98 @@ def create_output(cfg):
     dirname = cfg.OUTPUT_DIR
     os.makedirs(dirname, exist_ok=True)
     open(os.path.join(dirname, "metrics.json"), "a").close()
+
+
+def get_bb(mask):
+    """
+    infer bounding box from mask (as detectron2.structures.boxes.BoxMode.XYXY_ABS)
+    """
+    x_proj = np.where(np.amax(mask, axis=0) > 0)
+    xmin = np.min(x_proj)
+    xmax = np.max(x_proj)
+
+    y_proj = np.where(np.amax(mask, axis=1) > 0)
+    ymin = np.min(y_proj)
+    ymax = np.max(y_proj)
+    return [xmin, ymin, xmax, ymax]
+
+
+class build_dataset_dict:
+    """
+    build a dataset dictionary representing all images in a directory
+    """
+
+    def __init__(self, img_dir):
+        self.img_dir = img_dir
+
+    def __call__(self):
+        assert os.listdir(self.img_dir)
+        dicts = []
+        for idx, f in enumerate(glob.glob(os.path.join(self.img_dir, "*.png"))):
+            dicts.append(
+                {
+                    "file_name": f,
+                    "image_id": idx,
+                }
+            )
+        return dicts
+
+
+class build_mapper:
+    """
+    build a mapper retrieving the mask from a RGBA image and applying the specified
+     augmentations
+    """
+
+    def __init__(self, aug):
+        self.aug = aug
+
+    def __call__(self, dataset_dict):
+        rgba = cv2.imread(dataset_dict["file_name"], cv2.IMREAD_UNCHANGED)
+        img = rgba[:, :, :3]
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        mask = rgba[:, :, 3]
+
+        augment = self.aug(image=img, mask=mask)
+        img = augment["image"]
+        mask = augment["mask"]
+
+        dataset_dict["image"] = torch.as_tensor(
+            img.transpose(2, 0, 1).astype("float32")
+        )
+        anns = [
+            {
+                "segmentation": mask.astype(bool),
+                "category_id": 0,
+                "bbox": get_bb(mask),
+                "bbox_mode": BoxMode.XYXY_ABS,
+            }
+        ]
+        instances = detection_utils.annotations_to_instances(
+            anns, img.shape[:2], "bitmask"
+        )
+        dataset_dict["instances"] = instances
+        dataset_dict["height"] = img.shape[0]
+        dataset_dict["width"] = img.shape[1]
+        return dataset_dict
+
+
+class SingleInstanceRgbaDataset:
+    def __init__(img_dir, aug):
+        assert os.listdir(img_dir), "No images found in specified dir"
+        self.img_dir = img_dir
+
+    def get_rgba_dataset_dict(img_dir):
+        assert os.listdir(img_dir)
+        dicts = []
+        for idx, f in enumerate(glob.glob(os.path.join(img_dir, "*.png"))):
+            dicts.append(
+                {
+                    "file_name": f,
+                    "image_id": idx,
+                }
+            )
+        return dicts
 
 
 class BaseTrainer(DefaultTrainer):
