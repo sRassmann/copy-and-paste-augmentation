@@ -122,19 +122,19 @@ class CapDataset(Dataset):
 
     @configurable
     def __init__(
-        self,
-        patch_pool: str,
-        background_anno: str,
-        background_dir: str,
-        max_resolution: (int, int),
-        pools_cfg: str,
-        random_cap_cfg: CN,
-        collection_box_cfg: CN,
-        hq_cfg: CN,
-        augment_cfg: CN = None,
-        seed: int = 0,
-        length: int = 15000,
-    ):
+            self,
+            patch_pool: str,
+            background_anno: str,
+            background_dir: str,
+            max_resolution: (int, int),
+            pools_cfg: str,
+            random_cap_cfg: CN,
+            collection_box_cfg: CN,
+            hq_cfg: CN,
+            augment_cfg: CN = None,
+            seed: int = 0,
+            length: int = 15000,
+            ):
         self.parent_seed = seed
         np.random.seed(seed)
         self.length = length
@@ -150,14 +150,14 @@ class CapDataset(Dataset):
                         hue=augment_cfg.HUE_SHIFT_LIMIT,
                         always_apply=False,
                         p=augment_cfg.COLOR_JITTER_P,
-                    ),
+                        ),
                     A.transforms.GaussNoise(
                         p=augment_cfg.GAUSSIAN_NOISE_P,
                         var_limit=augment_cfg.GAUSSIAN_NOISE_RANGE,
-                    ),
-                ],
+                        ),
+                    ],
                 p=augment_cfg.P,
-            )
+                )
             if augment_cfg and augment_cfg.P > 0
             else A.Compose([A.NoOp()], p=0.0)
         )
@@ -166,7 +166,7 @@ class CapDataset(Dataset):
             background_dir=background_dir,
             background_anno=background_anno,
             max_resolution=max_resolution,
-        )
+            )
 
         assert random_cap_cfg.P + collection_box_cfg.P + hq_cfg.P == 1
         self.collection_box_p = collection_box_cfg.P
@@ -179,13 +179,13 @@ class CapDataset(Dataset):
                 self.background_pool,
                 scale_augment_dict=self.get_pool_cfg(
                     pools_cfg, collection_box_cfg.POOL_NAME
-                ),
+                    ),
                 max_n_objs=collection_box_cfg.MAX_N_OBJS_PER_IMAGE,
                 skip_if_overlap_range=collection_box_cfg.SKIP_IF_OVERLAP_RANGE,
                 grid_pos_jitter=collection_box_cfg.GRID_JITTER,
                 space_jitter=collection_box_cfg.SPACE_JITTER,
                 augment=self.create_augmentations(collection_box_cfg),
-            )
+                )
 
         if random_cap_cfg.P > 0:
             self.random_cpg = RandomGenerator(
@@ -193,12 +193,12 @@ class CapDataset(Dataset):
                 self.background_pool,
                 scale_augment_dict=self.get_pool_cfg(
                     pools_cfg, random_cap_cfg.POOL_NAME
-                ),
+                    ),
                 max_n_objs=random_cap_cfg.MAX_N_OBJS_PER_IMAGE,
                 skip_if_overlap_range=random_cap_cfg.SKIP_IF_OVERLAP_RANGE,
                 assumed_obj_size=random_cap_cfg.ASSUMED_OBJ_SIZE,
                 augment=self.create_augmentations(random_cap_cfg),
-            )
+                )
 
         if hq_cfg.P > 0:
             raise NotImplementedError
@@ -216,7 +216,7 @@ class CapDataset(Dataset):
             "hq_cfg": cfg.CAP.HIGH_QUALITY_GENERATOR,
             "augment_cfg": cfg.CAP.AUGMENT,
             "length": cfg.SOLVER.MAX_ITER,
-        }
+            }
 
     @staticmethod
     def get_pool_cfg(cfg_path, pool_key) -> dict:
@@ -241,9 +241,9 @@ class CapDataset(Dataset):
                 aug_transforms=None,
                 n_augmentations=0,  # only create Pool
                 scale=1,
-            )
+                )
             for cat_id, cat_label in zip(cat_ids, cat_labels)
-        }
+            }
 
     @staticmethod
     def create_augmentations(generator_node: CN) -> A.Compose or None:
@@ -272,13 +272,13 @@ class CapDataset(Dataset):
                     border_mode=0,
                     value=(0, 0, 0),
                     mask_value=0,
-                ),
+                    ),
                 A.augmentations.transforms.OpticalDistortion(
                     distort_limit=N.DISTORT_LIMIT,
                     interpolation=cv2.INTER_LINEAR,
                     border_mode=cv2.BORDER_CONSTANT,
                     p=N.DISTORT_P,
-                ),
+                    ),
                 A.transforms.ColorJitter(
                     brightness=N.BRIGHTNESS_SHIFT_LIMIT,
                     contrast=N.CONTRAST_SHIFT_LIMIT,
@@ -286,11 +286,11 @@ class CapDataset(Dataset):
                     hue=N.HUE_SHIFT_LIMIT,
                     always_apply=False,
                     p=N.COLOR_JITTER_P,
-                ),
+                    ),
                 A.transforms.FancyPCA(alpha=N.PCA_ALPHA, always_apply=False, p=N.PCA_P),
-            ],
+                ],
             p=N.P,
-        )
+            )
 
     @staticmethod
     def try_restore_from_pickle(cfg):
@@ -305,9 +305,9 @@ class CapDataset(Dataset):
                 + time.strftime(
                     "%Y/%m/%d-%H:%M:%S",
                     time.localtime(os.path.getmtime(cfg.CAP.PICKLE_PATH)),
-                )
+                    )
                 + ")"
-            )
+                )
 
             # TODO assert equality of params
             return self
@@ -354,7 +354,7 @@ class CapDataset(Dataset):
         image = self.final_augment(image=image)["image"]
         dataset_dict["image"] = torch.as_tensor(
             image.transpose(2, 0, 1).astype("float32")
-        )
+            )
         cats = [int(cat) - 1 for cat in cats]
         anns = [
             {
@@ -362,12 +362,12 @@ class CapDataset(Dataset):
                 "category_id": cat,
                 "bbox": bbox,
                 "bbox_mode": BoxMode.XYWH_ABS,
-            }
+                }
             for mask, bbox, cat in zip(image_masks, bboxs, cats)
-        ]
+            ]
         instances = detection_utils.annotations_to_instances(
             anns, image.shape[:2], "bitmask"
-        )
+            )
         dataset_dict["instances"] = instances
         dataset_dict["height"] = image.shape[0]
         dataset_dict["width"] = image.shape[1]
@@ -416,13 +416,13 @@ class CapTrainer(BaseTrainer):
         dataset = CapDataset.try_restore_from_pickle(cfg)
         train_loader = build_detection_train_loader(
             dataset, total_batch_size=1, mapper=None
-        )
+            )
         return train_loader
 
 
 class CapTrainerTrainLoss(CapTrainer):
     """
-    Trainer also tracking the loss of the original train images in order to asses
+    Trainer also tracking the loss of the original train images in order to asses 
      overfitting in the CAP setting.
     """
 
@@ -443,12 +443,12 @@ class CapTrainerTrainLoss(CapTrainer):
                             ResizeShortestEdge(
                                 self.cfg.INPUT.MIN_SIZE_TEST,
                                 self.cfg.INPUT.MAX_SIZE_TEST,
-                            )
-                        ],
+                                )
+                            ],
+                        ),
                     ),
                 ),
-            ),
-        )
+            )
         hooks.insert(
             -1,
             LossEvalHook(
@@ -464,13 +464,13 @@ class CapTrainerTrainLoss(CapTrainer):
                             ResizeShortestEdge(
                                 self.cfg.INPUT.MIN_SIZE_TEST,
                                 self.cfg.INPUT.MAX_SIZE_TEST,
-                            )
-                        ],
+                                )
+                            ],
+                        ),
                     ),
-                ),
                 "train_loss",
-            ),
-        )
+                ),
+            )
         logger = logging.getLogger(__name__)
         logger.critical("actually, this DatasetMapper is used for testing")
         return hooks

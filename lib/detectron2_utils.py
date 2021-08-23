@@ -76,6 +76,40 @@ def get_bb(mask):
     return [xmin, ymin, xmax, ymax]
 
 
+def place_noise_particles(img, noise, x=-1, y=-1, cover_objects=True):
+    """
+    place a noise particle on the image
+
+    Args:
+        img (np.ndarray): target image (8 bit int bgra) and mask
+        noise (np.ndarray): noise (8 bit int bgra) and mask
+        x (int): left boundary of paste position on image (default: random)
+        y (int): lower boundary of paste position on image (default: random)
+        cover_objects (bool): If True the noise can cover the masked object
+    """
+    if x < 0 or y < 0:
+        x = np.random.randint(max(1, img.shape[1] - noise.shape[1]))
+        y = np.random.randint(max(1, img.shape[0] - noise.shape[0]))
+
+    if noise.shape[0] > img.shape[0]:
+        noise = noise[0 : img.shape[0], :, :]
+    if noise.shape[1] > img.shape[1]:
+        noise = noise[:, 0 : img.shape[1], :]
+
+    crop = img[y : y + noise.shape[0], x : x + noise.shape[1], :].copy()
+    noise_mask = noise[:, :, 3]
+
+    if not cover_objects:
+        noise_mask = cv2.bitwise_and(noise_mask, cv2.bitwise_not(crop[:, :, 3]))
+    noise_mask = np.stack([noise_mask / (2 ** 8 - 1)] * 3, axis=2)
+
+    crop[:, :, :3] = (
+        noise_mask * noise[:, :, :3] + (1 - noise_mask) * crop[:, :, :3]
+    ).astype(np.uint8)
+    img[y : y + noise.shape[0], x : x + noise.shape[1], :3] = crop[:, :, :3]
+    return img
+
+
 class build_dataset_dict:
     """
     build a dataset dictionary representing all images in a directory
@@ -103,11 +137,26 @@ class build_mapper:
      augmentations
     """
 
-    def __init__(self, aug):
+    def __init__(self, aug, nail_dir=None, text_dir=None):
         self.aug = aug
+        self.nails = glob.glob(os.path.join(nail_dir, "*.png")) if nail_dir else None
+        self.text = glob.glob(os.path.join(text_dir, "*.png")) if text_dir else None
 
     def __call__(self, dataset_dict):
         rgba = cv2.imread(dataset_dict["file_name"], cv2.IMREAD_UNCHANGED)
+
+        if np.random.rand() > 0.7 and self.nails:
+            place_noise_particles(
+                rgba,
+                cv2.imread(np.random.choice(self.nails), cv2.IMREAD_UNCHANGED),
+                x=-1,
+                y=-1,
+                cover_objects=True,
+            )
+        if np.random.rand() > 0.7 and self.text:
+            noise = cv2.imread(np.random.choice(self.text), cv2.IMREAD_UNCHANGED)
+            place_noise_particles(rgba, noise, x=-1, y=-1, cover_objects=False)
+
         img = rgba[:, :, :3]
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         mask = rgba[:, :, 3]
@@ -115,6 +164,10 @@ class build_mapper:
         augment = self.aug(image=img, mask=mask)
         img = augment["image"]
         mask = augment["mask"]
+
+        if np.random.rand() > 0.8:
+            img[:, :, 2] = cv2.add(img[:, :, 2], mask // 255 * img[:, :, 2] // 8)
+            img[:, :, 2] = cv2.add(img[:, :, 2], mask // 255 * np.random.randint(5, 10))
 
         dataset_dict["image"] = torch.as_tensor(
             img.transpose(2, 0, 1).astype("float32")
@@ -134,24 +187,6 @@ class build_mapper:
         dataset_dict["height"] = img.shape[0]
         dataset_dict["width"] = img.shape[1]
         return dataset_dict
-
-
-class SingleInstanceRgbaDataset:
-    def __init__(img_dir, aug):
-        assert os.listdir(img_dir), "No images found in specified dir"
-        self.img_dir = img_dir
-
-    def get_rgba_dataset_dict(img_dir):
-        assert os.listdir(img_dir)
-        dicts = []
-        for idx, f in enumerate(glob.glob(os.path.join(img_dir, "*.png"))):
-            dicts.append(
-                {
-                    "file_name": f,
-                    "image_id": idx,
-                }
-            )
-        return dicts
 
 
 class BaseTrainer(DefaultTrainer):
