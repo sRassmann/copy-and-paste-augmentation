@@ -23,9 +23,11 @@ import pickle
 import time
 import datetime
 import logging
+import glob
+import cv2
 
 
-def visualize_detectron2_loader(data_loader, cfg, n_examples=5):
+def visualize_detectron2_loader(data_loader, cfg, n_examples=5, scale=1):
     """
     show images from train or test loader with COCO annotations based on
      https://github.com/facebookresearch/detectron2/blob/master/tools/visualize_data.py
@@ -36,13 +38,18 @@ def visualize_detectron2_loader(data_loader, cfg, n_examples=5):
                 return
             img = per_image["image"].permute(1, 2, 0).cpu().detach().numpy()
             img = detection_utils.convert_image_to_rgb(img, cfg.INPUT.FORMAT)
-            visualizer = Visualizer(img, scale=1)
+            visualizer = Visualizer(img, scale=scale)
             target_fields = per_image["instances"].get_fields()
             vis = visualizer.overlay_instances(
                 boxes=target_fields.get("gt_boxes", None),
                 masks=target_fields.get("gt_masks", None),
             )
             cv2_imshow(vis.get_image()[:, :, ::-1])
+            cv2_imshow(
+                cv2.resize(
+                    img, (round(img.shape[1] * scale), round(img.shape[0] * scale))
+                )
+            )
             n_examples -= 1
 
 
@@ -53,6 +60,133 @@ def create_output(cfg):
     dirname = cfg.OUTPUT_DIR
     os.makedirs(dirname, exist_ok=True)
     open(os.path.join(dirname, "metrics.json"), "a").close()
+
+
+def get_bb(mask):
+    """
+    infer bounding box from mask (as detectron2.structures.boxes.BoxMode.XYXY_ABS)
+    """
+    x_proj = np.where(np.amax(mask, axis=0) > 0)
+    xmin = np.min(x_proj)
+    xmax = np.max(x_proj)
+
+    y_proj = np.where(np.amax(mask, axis=1) > 0)
+    ymin = np.min(y_proj)
+    ymax = np.max(y_proj)
+    return [xmin, ymin, xmax, ymax]
+
+
+def place_noise_particles(img, noise, x=-1, y=-1, cover_objects=True):
+    """
+    place a noise particle on the image
+
+    Args:
+        img (np.ndarray): target image (8 bit int bgra) and mask
+        noise (np.ndarray): noise (8 bit int bgra) and mask
+        x (int): left boundary of paste position on image (default: random)
+        y (int): lower boundary of paste position on image (default: random)
+        cover_objects (bool): If True the noise can cover the masked object
+    """
+    if x < 0 or y < 0:
+        x = np.random.randint(max(1, img.shape[1] - noise.shape[1]))
+        y = np.random.randint(max(1, img.shape[0] - noise.shape[0]))
+
+    if noise.shape[0] > img.shape[0]:
+        noise = noise[0 : img.shape[0], :, :]
+    if noise.shape[1] > img.shape[1]:
+        noise = noise[:, 0 : img.shape[1], :]
+
+    crop = img[y : y + noise.shape[0], x : x + noise.shape[1], :].copy()
+    noise_mask = noise[:, :, 3]
+
+    if not cover_objects:
+        noise_mask = cv2.bitwise_and(noise_mask, cv2.bitwise_not(crop[:, :, 3]))
+    noise_mask = np.stack([noise_mask / (2 ** 8 - 1)] * 3, axis=2)
+
+    crop[:, :, :3] = (
+        noise_mask * noise[:, :, :3] + (1 - noise_mask) * crop[:, :, :3]
+    ).astype(np.uint8)
+    img[y : y + noise.shape[0], x : x + noise.shape[1], :3] = crop[:, :, :3]
+    return img
+
+
+class build_dataset_dict:
+    """
+    build a dataset dictionary representing all images in a directory
+    """
+
+    def __init__(self, img_dir):
+        self.img_dir = img_dir
+
+    def __call__(self):
+        assert os.listdir(self.img_dir)
+        dicts = []
+        for idx, f in enumerate(glob.glob(os.path.join(self.img_dir, "*.png"))):
+            dicts.append(
+                {
+                    "file_name": f,
+                    "image_id": idx,
+                }
+            )
+        return dicts
+
+
+class build_mapper:
+    """
+    build a mapper retrieving the mask from a RGBA image and applying the specified
+     augmentations
+    """
+
+    def __init__(self, aug, nail_dir=None, text_dir=None):
+        self.aug = aug
+        self.nails = glob.glob(os.path.join(nail_dir, "*.png")) if nail_dir else None
+        self.text = glob.glob(os.path.join(text_dir, "*.png")) if text_dir else None
+
+    def __call__(self, dataset_dict):
+        rgba = cv2.imread(dataset_dict["file_name"], cv2.IMREAD_UNCHANGED)
+
+        if np.random.rand() > 0.7 and self.nails:
+            place_noise_particles(
+                rgba,
+                cv2.imread(np.random.choice(self.nails), cv2.IMREAD_UNCHANGED),
+                x=-1,
+                y=-1,
+                cover_objects=True,
+            )
+        if np.random.rand() > 0.7 and self.text:
+            noise = cv2.imread(np.random.choice(self.text), cv2.IMREAD_UNCHANGED)
+            place_noise_particles(rgba, noise, x=-1, y=-1, cover_objects=False)
+
+        img = rgba[:, :, :3]
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        mask = rgba[:, :, 3]
+
+        augment = self.aug(image=img, mask=mask)
+        img = augment["image"]
+        mask = augment["mask"]
+
+        if np.random.rand() > 0.8:
+            img[:, :, 2] = cv2.add(img[:, :, 2], mask // 255 * img[:, :, 2] // 8)
+            img[:, :, 2] = cv2.add(img[:, :, 2], mask // 255 * np.random.randint(5, 10))
+
+        dataset_dict["image"] = torch.as_tensor(
+            img.transpose(2, 0, 1).astype("float32")
+        )
+        anns = [
+            {
+                "segmentation": mask.astype(bool),
+                "category_id": 0,
+                "bbox": get_bb(mask),
+                "bbox_mode": BoxMode.XYXY_ABS,
+            }
+        ]
+        instances = detection_utils.annotations_to_instances(
+            anns, img.shape[:2], "bitmask"
+        )
+        dataset_dict["instances"] = instances
+        dataset_dict["height"] = img.shape[0]
+        dataset_dict["width"] = img.shape[1]
+        return dataset_dict
 
 
 class BaseTrainer(DefaultTrainer):
