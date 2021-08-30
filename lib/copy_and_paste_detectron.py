@@ -44,6 +44,7 @@ def add_cap_config(cfg: CN):
     c.BACKGROUND_ANNO = "data/copy_and_paste/backgrounds/background_anno.json"
     c.MAX_RESOLUTION = (1800, 1500)
     c.POOLS_CFG = "configs/insects_cap_pool_config.yaml"
+    c.MAX_POOL_SIZE = None  # maximum number of considered images per category
 
     c.RANDOM_GENERATOR = CN()
     R = c.RANDOM_GENERATOR
@@ -54,7 +55,7 @@ def add_cap_config(cfg: CN):
     R.ASSUMED_OBJ_SIZE = 40000
     R.AUGMENT = CN()
     N = R.AUGMENT
-    N.P = 0.1
+    N.P = 0.9
     N.SCALE_RANGE = (0, 0)
     N.ROTATE_RANGE = (-180, 180)
     N.ROTATE_SCALE_P = 0.85
@@ -71,7 +72,7 @@ def add_cap_config(cfg: CN):
     c.COLLECTION_BOX_GENERATOR = CN()
     B = c.COLLECTION_BOX_GENERATOR
     B.POOL_NAME = "collection_box_pool"
-    B.P = 0.6
+    B.P = 0.5
     B.SKIP_IF_OVERLAP_RANGE = (0.1, 0.2)
     B.MAX_N_OBJS_PER_IMAGE = 150
     B.GRID_JITTER = (0.1, 0.35)
@@ -122,23 +123,26 @@ class CapDataset(Dataset):
 
     @configurable
     def __init__(
-            self,
-            patch_pool: str,
-            background_anno: str,
-            background_dir: str,
-            max_resolution: (int, int),
-            pools_cfg: str,
-            random_cap_cfg: CN,
-            collection_box_cfg: CN,
-            hq_cfg: CN,
-            augment_cfg: CN = None,
-            seed: int = 0,
-            length: int = 15000,
-            ):
+        self,
+        patch_pool: str,
+        background_anno: str,
+        background_dir: str,
+        max_resolution: (int, int),
+        pools_cfg: str,
+        random_cap_cfg: CN,
+        collection_box_cfg: CN,
+        hq_cfg: CN,
+        augment_cfg: CN = None,
+        seed: int = 0,
+        length: int = 15000,
+        max_pool_size: int = None,
+    ):
         self.parent_seed = seed
         np.random.seed(seed)
         self.length = length
-        self.patch_pool = self.init_base_patch_pool(patch_pool)
+        self.patch_pool = self.init_base_patch_pool(
+            patch_pool, self.get_labelling_dict(pools_cfg), max_pool_size
+        )
 
         self.final_augment = (  # no augmentations of masks possible
             A.Compose(
@@ -150,14 +154,14 @@ class CapDataset(Dataset):
                         hue=augment_cfg.HUE_SHIFT_LIMIT,
                         always_apply=False,
                         p=augment_cfg.COLOR_JITTER_P,
-                        ),
+                    ),
                     A.transforms.GaussNoise(
                         p=augment_cfg.GAUSSIAN_NOISE_P,
                         var_limit=augment_cfg.GAUSSIAN_NOISE_RANGE,
-                        ),
-                    ],
+                    ),
+                ],
                 p=augment_cfg.P,
-                )
+            )
             if augment_cfg and augment_cfg.P > 0
             else A.Compose([A.NoOp()], p=0.0)
         )
@@ -166,7 +170,7 @@ class CapDataset(Dataset):
             background_dir=background_dir,
             background_anno=background_anno,
             max_resolution=max_resolution,
-            )
+        )
 
         assert random_cap_cfg.P + collection_box_cfg.P + hq_cfg.P == 1
         self.collection_box_p = collection_box_cfg.P
@@ -179,27 +183,25 @@ class CapDataset(Dataset):
                 self.background_pool,
                 scale_augment_dict=self.get_pool_cfg(
                     pools_cfg, collection_box_cfg.POOL_NAME
-                    ),
+                ),
                 max_n_objs=collection_box_cfg.MAX_N_OBJS_PER_IMAGE,
                 skip_if_overlap_range=collection_box_cfg.SKIP_IF_OVERLAP_RANGE,
                 grid_pos_jitter=collection_box_cfg.GRID_JITTER,
                 space_jitter=collection_box_cfg.SPACE_JITTER,
                 augment=self.create_augmentations(collection_box_cfg),
-                )
-
+            )
         if random_cap_cfg.P > 0:
             self.random_cpg = RandomGenerator(
                 self.patch_pool,
                 self.background_pool,
                 scale_augment_dict=self.get_pool_cfg(
                     pools_cfg, random_cap_cfg.POOL_NAME
-                    ),
+                ),
                 max_n_objs=random_cap_cfg.MAX_N_OBJS_PER_IMAGE,
                 skip_if_overlap_range=random_cap_cfg.SKIP_IF_OVERLAP_RANGE,
                 assumed_obj_size=random_cap_cfg.ASSUMED_OBJ_SIZE,
                 augment=self.create_augmentations(random_cap_cfg),
-                )
-
+            )
         if hq_cfg.P > 0:
             raise NotImplementedError
 
@@ -216,7 +218,8 @@ class CapDataset(Dataset):
             "hq_cfg": cfg.CAP.HIGH_QUALITY_GENERATOR,
             "augment_cfg": cfg.CAP.AUGMENT,
             "length": cfg.SOLVER.MAX_ITER,
-            }
+            "max_pool_size": cfg.CAP.MAX_POOL_SIZE,
+        }
 
     @staticmethod
     def get_pool_cfg(cfg_path, pool_key) -> dict:
@@ -225,25 +228,44 @@ class CapDataset(Dataset):
         return d[pool_key]
 
     @staticmethod
-    def init_base_patch_pool(obj_dir) -> None:
+    def get_labelling_dict(cfg_path, label_key="label_IDs") -> dict or None:
+        with open(cfg_path, "r") as y:
+            d = yaml.load(y, Loader=yaml.loader.BaseLoader)
+        return d[label_key] if label_key in d.keys() else None
+
+    @staticmethod
+    def init_base_patch_pool(obj_dir, labelling_dict=None, max_size=None) -> dict:
         """
         initializes pool of raw object patches reused in for all created generators
+
+        Args:
+            obj_dir (str): path to dir containing the patch categories (each cat in
+             separate folder)
+            labelling_dict (dict): dictionary specifying the category_IDs for each
+             patch category (format: cat_name: cat_ID). If None, IDs are assigned in
+             alphabetic order.
+
+        Returns: dict of base PatchPools
         """
-        dirs = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
-        cat_ids = [s.split("-")[0] for s in dirs]
-        cat_labels = [s.split("-")[1] for s in dirs]
+        # TODO each loop iteration in a separate thread?
+        cat_labels = [
+            os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))
+        ]
+        if not labelling_dict:
+            labelling_dict = {cat_label: i for i, cat_label in enumerate(cat_labels)}
         # create patch pool dict
         return {
             cat_label: PatchPool(
-                os.path.join(obj_dir, f"{cat_id}-{cat_label}"),
-                cat_id=cat_id,
+                os.path.join(obj_dir, cat_label),
+                cat_id=labelling_dict[cat_label],
                 cat_label=cat_label,
                 aug_transforms=None,
                 n_augmentations=0,  # only create Pool
                 scale=1,
-                )
-            for cat_id, cat_label in zip(cat_ids, cat_labels)
-            }
+                max_size=max_size,
+            )
+            for cat_label in cat_labels
+        }
 
     @staticmethod
     def create_augmentations(generator_node: CN) -> A.Compose or None:
@@ -272,13 +294,13 @@ class CapDataset(Dataset):
                     border_mode=0,
                     value=(0, 0, 0),
                     mask_value=0,
-                    ),
+                ),
                 A.augmentations.transforms.OpticalDistortion(
                     distort_limit=N.DISTORT_LIMIT,
                     interpolation=cv2.INTER_LINEAR,
                     border_mode=cv2.BORDER_CONSTANT,
                     p=N.DISTORT_P,
-                    ),
+                ),
                 A.transforms.ColorJitter(
                     brightness=N.BRIGHTNESS_SHIFT_LIMIT,
                     contrast=N.CONTRAST_SHIFT_LIMIT,
@@ -286,11 +308,11 @@ class CapDataset(Dataset):
                     hue=N.HUE_SHIFT_LIMIT,
                     always_apply=False,
                     p=N.COLOR_JITTER_P,
-                    ),
+                ),
                 A.transforms.FancyPCA(alpha=N.PCA_ALPHA, always_apply=False, p=N.PCA_P),
-                ],
+            ],
             p=N.P,
-            )
+        )
 
     @staticmethod
     def try_restore_from_pickle(cfg):
@@ -305,9 +327,9 @@ class CapDataset(Dataset):
                 + time.strftime(
                     "%Y/%m/%d-%H:%M:%S",
                     time.localtime(os.path.getmtime(cfg.CAP.PICKLE_PATH)),
-                    )
-                + ")"
                 )
+                + ")"
+            )
 
             # TODO assert equality of params
             return self
@@ -354,20 +376,20 @@ class CapDataset(Dataset):
         image = self.final_augment(image=image)["image"]
         dataset_dict["image"] = torch.as_tensor(
             image.transpose(2, 0, 1).astype("float32")
-            )
-        cats = [int(cat) - 1 for cat in cats]
+        )
+        cats = [int(cat) for cat in cats]
         anns = [
             {
                 "segmentation": mask.astype(bool),
                 "category_id": cat,
                 "bbox": bbox,
                 "bbox_mode": BoxMode.XYWH_ABS,
-                }
+            }
             for mask, bbox, cat in zip(image_masks, bboxs, cats)
-            ]
+        ]
         instances = detection_utils.annotations_to_instances(
             anns, image.shape[:2], "bitmask"
-            )
+        )
         dataset_dict["instances"] = instances
         dataset_dict["height"] = image.shape[0]
         dataset_dict["width"] = image.shape[1]
@@ -416,13 +438,13 @@ class CapTrainer(BaseTrainer):
         dataset = CapDataset.try_restore_from_pickle(cfg)
         train_loader = build_detection_train_loader(
             dataset, total_batch_size=1, mapper=None
-            )
+        )
         return train_loader
 
 
 class CapTrainerTrainLoss(CapTrainer):
     """
-    Trainer also tracking the loss of the original train images in order to asses 
+    Trainer also tracking the loss of the original train images in order to asses
      overfitting in the CAP setting.
     """
 
@@ -443,12 +465,12 @@ class CapTrainerTrainLoss(CapTrainer):
                             ResizeShortestEdge(
                                 self.cfg.INPUT.MIN_SIZE_TEST,
                                 self.cfg.INPUT.MAX_SIZE_TEST,
-                                )
-                            ],
-                        ),
+                            )
+                        ],
                     ),
                 ),
-            )
+            ),
+        )
         hooks.insert(
             -1,
             LossEvalHook(
@@ -464,13 +486,13 @@ class CapTrainerTrainLoss(CapTrainer):
                             ResizeShortestEdge(
                                 self.cfg.INPUT.MIN_SIZE_TEST,
                                 self.cfg.INPUT.MAX_SIZE_TEST,
-                                )
-                            ],
-                        ),
+                            )
+                        ],
                     ),
-                "train_loss",
                 ),
-            )
+                "train_loss",
+            ),
+        )
         logger = logging.getLogger(__name__)
         logger.critical("actually, this DatasetMapper is used for testing")
         return hooks

@@ -130,6 +130,7 @@ class CopyPasteGenerator(Dataset):
         max_n_objs=150,
         augment=None,
         skip_if_overlap_range=(0, 0),
+        mask_alpha_blending=0,
     ):
         """
         Initialize abstract CopyPasteGenerator.
@@ -154,6 +155,7 @@ class CopyPasteGenerator(Dataset):
         self.max_n_objs = max_n_objs
         self.augment = self.AUGMENT if not augment else augment
         self.org_pool = patch_pool
+        self.mask_alpha_blending = mask_alpha_blending
         if scale_augment_dict:
             self.patches = {cat: {} for cat in self.org_pool.keys()}
             self.add_scaled_versions(scale_augment_dict)
@@ -179,9 +181,9 @@ class CopyPasteGenerator(Dataset):
         Args:
             scale_augment_dict: dict containing each category as key and a dictionary
              definining the number of augmentations (value) at each scale level (key).
-             See the Example Input
+             See the Example Inputs
 
-        Example Input :
+        Example Input (1):
             {
                 'cat_label_1': {
                     1: 1,  # 1 augmentation per image on scale 1
@@ -189,29 +191,45 @@ class CopyPasteGenerator(Dataset):
                     1/4: 10,  # 10 augmentations per image on scale 1/4
                 },
                 'cat_label_2': {
-                    {1: 10},  # 10 augmentations per image on scale 1
-                    {2: 5},  # 5 augmentations per image on scale 2 (double size)
+                    1: 10,  # 10 augmentations per image on scale 1
+                    2: 5,  # 5 augmentations per image on scale 2 (double size)
                 },
                 'cat_label_3': {},  # no augmentations added
             }
+
+        Example Input (2):  # showcases the example for fixed object sizes
+            {
+                'cat_label_1': {  # will be ignored !
+                    500: 1,  # 1 augmentation per image at size 500
+                },
+                'all_categories': {
+                    500: 1,  # 1 augmentation per image at size 500
+                    250: 5,  # 5 augmentations per image at size 250
+                    125: 10,  # 10 augmentations per image at size 125
+                },
         """
-        for cat_label, d in scale_augment_dict.items():
-            for scale, n_aug in d.items():
+        if not "all_categories" in scale_augment_dict.keys():
+            for cat_label, d in scale_augment_dict.items():
                 if cat_label in self.org_pool.keys():
-                    self.add_scaled_version(cat_label, scale, n_aug)
+                    for scale, n_aug in d.items():
+                        self.add_scaled_version(cat_label, scale, n_aug)
                 else:
-                    warnings.warn(
-                        f"{cat_label} not in {self.patches.keys}, please check your category label!"
-                    )
+                    msg = f"category {str(cat_label)} not in found categories({self.patches.keys()}), please check your category label!"
+                    warnings.warn(msg)
+        else:
+            d = scale_augment_dict["all_categories"]
+            for cat_label in self.org_pool.keys():
+                for scale, n_aug in d.items():
+                    self.add_scaled_version(cat_label, scale, n_aug)
 
     def add_scaled_version(self, cat, scale=2, n_augmentations=1) -> None:
         """
         adds down-scaled version of defined category to the patch pool
 
         Args:
-            cat: category name (without the id) of the category to add
-            scale: base scale of the patches
-            n_augmentations: number of augmentations per object
+            cat (str): category name (without the id) of the category to add
+            scale (float): base scale of the patches
+            n_augmentations (int): number of augmentations per object
         """
         org_pool = self.org_pool[cat]
         self.patches[cat][scale] = PatchPool.create_from_existing_pool(
@@ -219,6 +237,7 @@ class CopyPasteGenerator(Dataset):
             aug_transforms=self.__class__.AUGMENT,
             n_augmentations=n_augmentations,
             scale=scale,
+            mask_alpha_blending=self.mask_alpha_blending,
         )
 
     def generate(
@@ -244,7 +263,9 @@ class CopyPasteGenerator(Dataset):
         return img, instance_mask, bboxs, cats, img_mask
 
     @abstractmethod
-    def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
+    def place_in_rect(
+        self, image, image_mask, frame_rect, max_n_objs
+    ) -> ([np.ndarray], [int, int, int, int], [int]):
         """
         Atomic obj placement routine, override this function for specific patterns of
         object placement
@@ -423,8 +444,7 @@ class PatchPool:
     """
     represents the pool of cached object patches for a single object category
 
-    Note, that instantiation loads and keeps ALL images in the specified dir into
-     memory.
+    Note, that instantiation loads and keeps ALL images in the specified dir in memory.
     """
 
     # TODO implement refreshing instances in separate thread
@@ -439,22 +459,27 @@ class PatchPool:
         n_augmentations=1,
         min_max_size=50,
         scale=1,
+        mask_alpha_blending=0,
+        max_size=None,
     ):
         """
         Create PatchPool object from obj_dir to handle RAM caching for the pool of
          patches.
 
         Args:
-            obj_dir: parent dir of patches, all  png files are considered
-            cat_id: category id of the represented patches
-            cat_label: label of the category, will be returned together with
-             the obj and mask
-            aug_transforms: Albumentations image and mask transformation (if None
-             the images is left unchanged)
-            n_augmentations: number of augmented versions per patch (if set to 0 only
-             the raw patch pool is created)
-            min_max_size: min size of the larger patch side
+            obj_dir (str): parent dir of patches, all  png files are considered
+            cat_id (int): category id of the represented patches (label returned
+             alongside the generated mask)
+            cat_label (str): label of the category (used for selecting pools)
+            aug_transforms (Albumentations.Transforms): Albumentations image and mask
+             transformation (if None the images is left unchanged)
+            n_augmentations (int): number of augmented versions per patch (if set to 0
+             only the raw patch pool is created)
+            min_max_size (int): min size of the larger patch side
             scale: scale factor by which the patch is resized
+            mask_alpha_blending (int): specifies the kernel size for blurring the mask.
+             This results in alpha blending between the backround image and the object
+             at the object corner.
         """
         self.cat_label = cat_label
         self.cat_id = cat_id
@@ -462,8 +487,9 @@ class PatchPool:
         self.n_augment = n_augmentations
         self.replace_prob = 0.0
         self.scale = scale
+        self.mask_alpha_blending = mask_alpha_blending
 
-        self.files = glob.glob(os.path.join(obj_dir, "*png"))
+        self.files = glob.glob(os.path.join(obj_dir, "*png"))[:max_size]
         self.org_image_pool = [
             self.open_image(file, min_max_size) for file in self.files
         ]
@@ -480,7 +506,12 @@ class PatchPool:
 
     @classmethod
     def create_from_existing_pool(
-        cls, parent, aug_transforms=None, n_augmentations=-1, scale=0.5
+        cls,
+        parent,
+        aug_transforms=None,
+        n_augmentations=-1,
+        scale=0.5,
+        mask_alpha_blending=0,
     ):
         """
         create pool from existing raw pool (e.g. for images on another - lower -
@@ -497,6 +528,7 @@ class PatchPool:
             self.n_augment = 1
         self.replace_prob = parent.replace_prob
         self.scale = scale
+        self.mask_alpha_blending = mask_alpha_blending
 
         self.objs = []
         self.masks = []
@@ -555,9 +587,21 @@ class PatchPool:
                 (int(mask.shape[1] * self.scale), int(mask.shape[0] * self.scale)),
                 interpolation=cv2.INTER_AREA,
             )
+        if self.mask_alpha_blending > 1:
+            mask = cv2.blur(
+                mask,
+                (
+                    np.random.randint(1, self.mask_alpha_blending),
+                    np.random.randint(1, self.mask_alpha_blending),
+                ),
+            )
+            # TODO for some reason the blurring sometimes changes value 0 to 1, dirty fix:
+            if np.min(mask) > 0:
+                mask = np.where(mask == np.min(mask), 0, mask)
 
         # crop to bounding box of augmented mask
         img, mask = self.crop_to_bb(img, mask)
+
         self.objs.append(img)
         self.masks.append(mask)
 
@@ -615,7 +659,7 @@ class PatchPool:
 
     def __getitem__(self, idx) -> (np.ndarray, np.ndarray):
         """
-        if idx out of bounds a random image is returned, img is returned as bgr
+        if idx out of bounds a random image is returned. img is returned as bgr.
         """
         if not 0 <= idx < self.__len__():
             idx = np.random.randint(0, self.__len__())
@@ -820,6 +864,7 @@ class RandomGenerator(CopyPasteGenerator):
         skip_if_overlap_range=(0.2, 0.4),
         assumed_obj_size=300 * 300,
         augment=AUGMENT,
+        mask_alpha_blending=0,
     ):
         """
         Extends overwritten init methods with the following args
@@ -833,10 +878,13 @@ class RandomGenerator(CopyPasteGenerator):
             scale_augment_dict=scale_augment_dict,
             max_n_objs=max_n_objs,
             skip_if_overlap_range=skip_if_overlap_range,
+            mask_alpha_blending=mask_alpha_blending,
         )
         self.assumed_obj_size = assumed_obj_size
 
-    def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
+    def place_in_rect(
+        self, image, image_mask, frame_rect, max_n_objs
+    ) -> ([np.ndarray], [int, int, int, int], [int]):
         """
         Implementation of abstract place_in_rect function in parent.
         """
@@ -904,6 +952,7 @@ class CollectionBoxGenerator(CopyPasteGenerator):
         grid_pos_jitter=(0.1, 0.35),
         space_jitter=(0.6, 1.2),
         augment=AUGMENT,
+        mask_alpha_blending=0,
     ):
         """
         Extends overwritten init methods with the following args
@@ -924,17 +973,20 @@ class CollectionBoxGenerator(CopyPasteGenerator):
             max_n_objs=max_n_objs,
             skip_if_overlap_range=skip_if_overlap_range,
             augment=augment,
+            mask_alpha_blending=mask_alpha_blending,
         )
         assert grid_pos_jitter[1] >= grid_pos_jitter[0]
         self.grid_jitter = grid_pos_jitter
         assert space_jitter[1] >= space_jitter[0]
         self.space_jitter = space_jitter
 
-    def place_in_rect(self, image, image_mask, frame_rect, max_n_objs) -> None:
+    def place_in_rect(
+        self, image, image_mask, frame_rect, max_n_objs
+    ) -> ([np.ndarray], [int, int, int, int], [int]):
         """
         Implementation of abstract place_in_rect function in parent.
         """
-        # choose random cat and scale (equival p for each cat and each scale within each cat
+        # choose random cat and scale (equival p for each cat and each scale within each cat)
         cat = np.random.choice([cat for cat in self.patches if self.patches[cat]])
         scale = np.random.choice(list(self.patches[cat]))
         pool = self.patches[cat][scale]
@@ -985,46 +1037,57 @@ class CollectionBoxGenerator(CopyPasteGenerator):
 
 
 def main():
-    obj_dir = os.path.join(constants.path_to_copy_and_paste, "objs")
-    dirs = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
-    cat_ids = [s.split("-")[0] for s in dirs]
-    cat_labels = [s.split("-")[1] for s in dirs]
-    # create patch pool dict
-    patch_pool = {
-        cat_label: PatchPool(
-            os.path.join(obj_dir, f"{cat_id}-{cat_label}"),
-            cat_id=cat_id,
-            cat_label=cat_label,
-            aug_transforms=None,
-            n_augmentations=0,  # only create Pool
-            scale=1,
-        )
-        for cat_id, cat_label in zip(cat_ids, cat_labels)
-    }
-
     background_pool = BackgroundPool(
         background_dir=os.path.join(constants.path_to_copy_and_paste, "backgrounds"),
-        background_anno="background_anno.json",
+        background_anno=os.path.join(
+            constants.path_to_copy_and_paste, "backgrounds/background_anno.json"
+        ),
         max_resolution=(1800, 1500),
     )
 
-    d = {
-        "Mesembryhmus_purpuralis": {1: 5, 0.25: 5},
-        "Smerinthus_ocellata": {1: 5, 1 / 2: 5},
-        "Acherontia_atroposa": {1: 5, 1 / 4: 3},
-        "bug_proxy_2": {1: 3},
-        "bug_proxy_3": {1: 3},
-        "bug_proxy_1": {1: 3, 4: 2},
-        "Trichotichnus": {1: 3, 4: 2},
+    obj_dir = os.path.join(constants.path_to_copy_and_paste, "beetles")
+    dirs = [os.path.basename(x) for x in glob.glob(os.path.join(obj_dir, "*"))]
+    cat_ids = {  # define ids returned for each patch class
+        "1035185": 0,
+        "1035542": 0,
+        "1036154": 2,
+        "4470539": 1,
+        "foo": 42,
     }
 
-    cpg = RandomGenerator(patch_pool, background_pool, d, max_n_objs=150)
+    cat_labels = dirs
+    # create base patch pool dict
+    patch_pool = {
+        cat_label: PatchPool(
+            os.path.join(obj_dir, cat_label),
+            cat_id=cat_ids[cat_label],
+            cat_label=cat_label,
+            aug_transforms=None,
+            n_augmentations=0,  # only create base Pool
+            scale=1,
+        )
+        for cat_label in cat_labels
+    }
+
+    scales = {  # define scales of each category
+        "1035185": {0.4: 1},
+        "1035542": {0.4: 2},
+        "1036154": {0.3: 1},
+        "4470539": {0.5: 2},
+        "foo": {},
+    }
+
+    cpg = CollectionBoxGenerator(
+        patch_pool, background_pool, scales, max_n_objs=150, mask_alpha_blending=3
+    )
     # cpg.visualize_pool()
     for i in range(10):
         img, image_masks, bboxs, cats, image_mask = cpg.generate(i)
         plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        plt.title(len(image_masks))
+        plt.title(i)
         plt.show()
+        cv2.imwrite(f"C:/users/sebas/Desktop/output/image_{i}.png", img)
+        cv2.imwrite(f"C:/users/sebas/Desktop/output/mask_{i}.png", image_mask)
 
 
 if __name__ == "__main__":
