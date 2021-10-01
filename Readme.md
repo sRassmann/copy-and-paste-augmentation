@@ -3,17 +3,17 @@
 This repository is a case study and proof-of-concept for leveraging Copy-and-Paste Augmentation (CPA) to perform object detection and instance segmentation on insect collection boxes (e.g. integrated into [*Inselect*](https://naturalhistorymuseum.github.io/inselect/)). It was a university project of the [Lab "Intelligent Vision Systems"](http://vsteinhage.github.io/HTML/pg.html) during the summer term 2021 at the University of Bonn.
 
 ## Basic principle
-Instances are obtained from annotated full-sized or pre-cropped images that are recombined in front of a realistic background (in this case different empty collection boxes). Fully random instance placements (R-CPA, left) and a placement pattern imitating real collection boxes (CB-CPA, right) were implemented.
+Instances are obtained from annotated full-sized or pre-cropped images that are recombined in front of a realistic background (in this case different empty collection boxes).
 
-<img src="images/CPA_demo.png" width="400" />
+<img src="images/CPA_demo.png" width="600" />
 
-<p float="left">
-  <img src="images/R-CPA_demo.png" width="230" /> 
-  <img src="images/CB-CPA_demo.png" width="150" />
-</p>
+Fully random instance placements (R-CPA, left) and a placement pattern imitating real collection boxes (CB-CPA, right) were implemented.
+
+R-CPA          |  CB-CPA
+:-------------------------:|:-------------------------:
+<img src="images/R-CPA_demo.png" width="322" /> |  <img src="images/CB-CPA_demo.png" width="210" />
 
 The project was build on [FAIR's *dectron2*](https://github.com/facebookresearch/detectron2) and used the [TensorMask](https://github.com/facebookresearch/detectron2/tree/master/projects/TensorMask) sliding-window instance segmentation model.
-
 
 ## Data
 The original data set only consisted of 3 unlabeled images of collection boxes containing bugs. As manual labeling turned out to be unfeasibly labor-intensive, the public dataset of [Hansen et al., 2019](https://zenodo.org/record/3549369#.YVc26JpByUn) containing > 60,000 cropped bug images distributed between a variety of species was used.
