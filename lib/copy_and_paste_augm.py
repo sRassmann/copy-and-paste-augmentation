@@ -1,6 +1,6 @@
 """
 class offering simple copy and paste data augmentation
- (compare https://arxiv.org/abs/2012.07177).
+ (compare e.g. https://arxiv.org/abs/2012.07177).
 Optimized to integrate with detectron2
 """
 import glob
@@ -448,7 +448,6 @@ class PatchPool:
     """
 
     # TODO implement refreshing instances in separate thread
-    # TODO implement blurring of the mask for alpha blending
 
     def __init__(
         self,
